@@ -473,6 +473,22 @@
       .connection { padding: 14px; }
       .monitor-head { margin-bottom: 18px; }
     }
+    .force-setup { margin-top: 14px; }
+    .force-fields {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin: 12px 0;
+    }
+    .force-fields label { display: grid; gap: 4px; }
+    .force-fields input { width: 100%; min-width: 0; }
+    #forceAlert {
+      background: #fff3f2;
+      border: 1px solid #efc5c2;
+      border-radius: 8px;
+      font-weight: 650;
+      padding: 9px 12px;
+    }
   </style>
 </head>
 
@@ -744,6 +760,7 @@
         <div class="divider"></div>
         <h2>Load cell diagnostics</h2>
         <p class="helper" id="forceHealth">Connect the Arduino to view sensor status.</p>
+        <p class="notice error" id="forceAlert" role="alert" hidden></p>
         <div class="metrics">
           <div>
             <div class="eyebrow">Raw ADC counts</div>
@@ -753,7 +770,35 @@
             <div class="eyebrow">Sample age at report</div>
             <div class="metric-value" id="forceAge">—</div>
           </div>
+          <div>
+            <div class="eyebrow">Measured force</div>
+            <div class="metric-value" id="forceNewtons">—</div>
+          </div>
+          <div>
+            <div class="eyebrow">Run peak compression</div>
+            <div class="metric-value" id="forcePeak">—</div>
+          </div>
         </div>
+        <p class="helper" id="forceProtection"></p>
+        <button type="button" class="btn" id="testAlarmSound">Test alarm sound</button>
+        <span class="helper" id="alarmSoundState" role="status"></span>
+
+        <details class="force-setup" id="forceSetup" hidden>
+          <summary>Calibrate force and set cutoff</summary>
+          <p class="helper">With the motor disabled, record the unloaded count and the count under a known compression load.</p>
+          <div class="force-fields">
+            <label>Unloaded count <input id="forceZero" type="number" step="1"></label>
+            <label>Loaded count <input id="forceLoaded" type="number" step="1"></label>
+            <label>Reference mass (kg) <input id="forceMass" type="number" min="0.000001" max="20" step="any"></label>
+          </div>
+          <button type="button" class="btn" id="calibrateForce" disabled>Save calibration</button>
+          <button type="button" class="btn" id="tareForce" disabled>Tare unloaded cell</button>
+          <div class="force-fields">
+            <label>Bench-validated cutoff (N) <input id="forceLimit" type="number" min="0.001" max="196.133" step="any"></label>
+          </div>
+          <button type="button" class="btn" id="setForceLimit" disabled>Set cutoff</button>
+          <p class="helper">Reset, recalibration and tare require setting the cutoff again.</p>
+        </details>
 
       </section>
     </div>
@@ -794,6 +839,12 @@
     let lastStatusAt = null;
     const STATUS_POLL_MS = 4000;
     const STATUS_EXPIRY_MS = 12000;
+    let forceSettingsAvailable = false;
+    let forceCalibrated = false;
+    let forceSampleUsable = false;
+    let forceCutoff = null;
+    let forceAlarm = null;
+    let alarmAudio = null;
 
     let rx = "";
     let timer = null;
@@ -833,6 +884,53 @@
         "error",
         isError
       );
+    }
+
+    function playAlarmSound() {
+      if (alarmAudio?.state !== "running") return false;
+
+      const start = alarmAudio.currentTime;
+      for (const offset of [0, 0.24, 0.48, 0.72]) {
+        const beep = alarmAudio.createOscillator();
+        const volume = alarmAudio.createGain();
+        const time = start + offset;
+        beep.frequency.value = 880;
+        volume.gain.setValueAtTime(0.001, time);
+        volume.gain.exponentialRampToValueAtTime(0.18, time + 0.02);
+        volume.gain.exponentialRampToValueAtTime(0.001, time + 0.16);
+        beep.connect(volume);
+        volume.connect(alarmAudio.destination);
+        beep.start(time);
+        beep.stop(time + 0.17);
+      }
+      return true;
+    }
+
+    async function enableAlarmSound(test = false) {
+      try {
+        alarmAudio ??= new AudioContext();
+        await alarmAudio.resume();
+        if (test && !playAlarmSound()) throw new Error("Audio is suspended.");
+        $("alarmSoundState").textContent = "Sound enabled.";
+      } catch (_) {
+        $("alarmSoundState").textContent = "Sound unavailable. Visual alarms remain active.";
+      }
+    }
+
+    function setForceAlarm(reason) {
+      const alarms = {
+        "FORCE OVERLOAD": "Force cutoff reached. Motor disabled.",
+        "FORCE SENSOR FAULT": "Force reading unavailable or invalid. Motor disabled."
+      };
+      const next = Object.hasOwn(alarms, reason) ? reason : null;
+      if (next === forceAlarm) return;
+
+      forceAlarm = next;
+      $("forceAlert").hidden = next === null;
+      $("forceAlert").textContent = next ? alarms[next] : "";
+      if (next && !playAlarmSound()) {
+        $("alarmSoundState").textContent = "Sound unavailable. Use Test alarm sound to enable it.";
+      }
     }
 
     // ==========================================
@@ -1027,6 +1125,10 @@
       const paused = pumpState === "PAUSED";
       const freshStatus = lastStatusAt !== null;
       const alarm = ["FAULT", "ALARM"].includes(pumpState);
+      const forceConfigAllowed = connected && freshStatus && idle &&
+        !busy && forceSettingsAvailable && forceSampleUsable;
+      const forceReady = direction === "BACKWARD" || !forceSettingsAvailable ||
+        (forceCalibrated && forceCutoff !== null && forceSampleUsable);
 
       $("connectBtn").textContent =
         connected
@@ -1042,7 +1144,11 @@
         busy || (connected && !idle);
 
       $("startBtn").disabled =
-        !connected || !freshStatus || !idle || busy;
+        !connected || !freshStatus || !idle || busy || !forceReady;
+
+      $("calibrateForce").disabled = !forceConfigAllowed;
+      $("tareForce").disabled = !forceConfigAllowed || !forceCalibrated;
+      $("setForceLimit").disabled = !forceConfigAllowed || !forceCalibrated;
 
       $("startBtn").textContent =
         busy
@@ -1225,7 +1331,8 @@
       const value = unit && rawValue.endsWith(unit)
         ? rawValue.slice(0, -unit.length).trim()
         : rawValue;
-      return /^\d+(?:\.\d+)?$/.test(value) &&
+      const pattern = name === "FORCE N" ? /^-?\d+(?:\.\d+)?$/ : /^\d+(?:\.\d+)?$/;
+      return pattern.test(value) &&
         Number.isFinite(Number(value))
         ? value
         : null;
@@ -1281,6 +1388,7 @@
         STALE: "Sample timed out.",
         "NO DATA": "No sample received. Check the HX711 connection.",
         SATURATED: "ADC saturated. Check the load and sensor wiring.",
+        INVALID: "Invalid HX711 transfer. Check the data and clock connections.",
         SUSPENDED: "Sampling resumes when the motor driver is disabled."
       };
       $("forceHealth").textContent = Object.hasOwn(forceLabels, forceStatus)
@@ -1297,12 +1405,27 @@
         age !== null && Number(age) < 1000;
       showReading("forceRaw", validForce ? count : null);
       showReading("forceAge", validForce ? age : null, " ms");
+      forceSettingsAvailable = ["YES", "NO"].includes(fields.get("FORCE CALIBRATED"));
+      forceCalibrated = fields.get("FORCE CALIBRATED") === "YES";
+      forceSampleUsable = validForce && forceStatus === "OK";
+      forceCutoff = readNumber(fields, "FORCE LIMIT N");
+      $("forceSetup").hidden = !forceSettingsAvailable;
+      showReading("forceNewtons", forceCalibrated && forceSampleUsable
+        ? readNumber(fields, "FORCE N") : null, " N");
+      showReading("forcePeak", forceCalibrated
+        ? readNumber(fields, "FORCE PEAK N") : null, " N");
+      $("forceProtection").textContent = !forceSettingsAvailable
+        ? (lastStatusAt !== null ? "Force cutoff unavailable on this firmware." : "")
+        : !forceCalibrated ? "Calibrate force to enable a forward run."
+        : forceCutoff === null ? "Set the validated force cutoff to enable a forward run."
+        : `Forward force cutoff: ${forceCutoff} N.`;
     }
 
     function clearStatus() {
       statusFields = null;
       lastStatusAt = null;
       renderStatus(new Map());
+      if (!connected) setForceAlarm(null);
       updateControls();
     }
 
@@ -1330,6 +1453,12 @@
             pumpState = reportedState;
             lastStatusAt = Date.now();
             renderStatus(fields);
+            if (reportedState === "ALARM" || reportedState === "FAULT") {
+              const reason = fields.get("ALARM REASON");
+              if (reason) setForceAlarm(reason);
+            } else {
+              setForceAlarm(null);
+            }
             updateControls();
             if (awaitingStatus && ["IDLE", "COMPLETE"].includes(pumpState)) {
               notice("Arduino status received.");
@@ -1359,6 +1488,7 @@
 
         if (line.startsWith("ALARM:")) {
           pumpState = "FAULT";
+          setForceAlarm(line.slice("ALARM:".length).trim());
         }
 
         if (pendingAck) {
@@ -1674,6 +1804,40 @@
       sendLine("STATUS").catch(error => notice(error.message, true));
     }
 
+    function saveForceCalibration() {
+      const zeroText = $("forceZero").value.trim();
+      const loadedText = $("forceLoaded").value.trim();
+      const zero = Number(zeroText);
+      const loaded = Number(loadedText);
+      const mass = numericValue("forceMass");
+      const validCount = (text, count) =>
+        /^-?\d+$/.test(text) && count > -8388608 && count < 8388607;
+      if (!validCount(zeroText, zero) || !validCount(loadedText, loaded) ||
+          zero === loaded || !(mass >= 0.000001 && mass <= 20)) {
+        notice("Enter two different, unsaturated ADC counts and the known mass in kg.", true);
+        return;
+      }
+
+      return runCommands(
+        [[`FORCE CAL ${zero} ${loaded} ${mass.toFixed(6)}`, "FORCE CALIBRATED"]],
+        "Force calibrated. Set your validated cutoff before a forward run."
+      );
+    }
+
+    function saveForceLimit() {
+      const limit = numericValue("forceLimit");
+      if (!(limit >= 0.001 && limit <= 196.133) ||
+          Math.abs(limit - Number(limit.toFixed(3))) > 1e-9) {
+        notice("Enter your validated cutoff in N within the 20 kg cell rating, up to 3 decimals.", true);
+        return;
+      }
+
+      return runCommands(
+        [[`FORCE LIMIT ${limit.toFixed(3)}`, "FORCE LIMIT UPDATED"]],
+        "Forward force cutoff set."
+      );
+    }
+
     async function runCommands(
       steps,
       label,
@@ -1968,7 +2132,17 @@
 
     $("startBtn").addEventListener(
       "click",
-      startPump
+      () => {
+        void enableAlarmSound();
+        void startPump();
+      }
+    );
+
+    $("testAlarmSound").addEventListener("click", () => enableAlarmSound(true));
+    $("calibrateForce").addEventListener("click", saveForceCalibration);
+    $("setForceLimit").addEventListener("click", saveForceLimit);
+    $("tareForce").addEventListener("click", () =>
+      runCommands([["FORCE TARE", "FORCE TARED"]], "Tared. Set the cutoff again.")
     );
 
     $("stopBtn").addEventListener(
