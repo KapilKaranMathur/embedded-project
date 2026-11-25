@@ -1,0 +1,13 @@
+.DS_Store
+.venv/
+.build/
+__pycache__/
+
+# Local development notes, legacy files, and recovery material.
+/AGENTS.md
+/.vscode/
+/backups/
+/dashboard_before_direction.html
+/syringe_pump_gui.py
+/docs/*
+!/docs/Syringe_Pump_Final_Report.tex
