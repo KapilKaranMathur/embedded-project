@@ -618,7 +618,7 @@
           </div>
         </div>
 
-        <div class="field">
+        <div class="field" id="volumeField">
           <label for="volume" class="field-title" id="volumeCaption">
             Target volume
           </label>
@@ -649,11 +649,11 @@
         <div class="divider"></div>
 
         <div class="duration">
-          <span>Ideal time from settings</span>
+          <span id="durationLabel">Ideal time from settings</span>
           <strong id="duration">—</strong>
         </div>
 
-        <p class="helper">
+        <p class="helper" id="startHelp">
           Start applies the syringe size, direction,
           flow rate and target volume in that order.
         </p>
@@ -845,6 +845,7 @@
     const JOG_KEEP_MS = 120;
     let jogSpeed = null;
     let keyboardJog = null;
+    let supportsHomeReturn = false;
     let forceSettingsAvailable = false;
     let forceCalibrated = false;
     let forceSampleUsable = false;
@@ -957,9 +958,13 @@
         : null;
     }
 
+    function returningHome() {
+      return supportsHomeReturn && direction === "BACKWARD";
+    }
+
     function settings() {
       const rate = numericValue("rate");
-      const volume = numericValue("volume");
+      const volume = returningHome() ? null : numericValue("volume");
 
       if (
         rate === null ||
@@ -974,9 +979,8 @@
       }
 
       if (
-        volume === null ||
-        volume < 0.01 ||
-        volume > syringe
+        !returningHome() &&
+        (volume === null || volume < 0.01 || volume > syringe)
       ) {
         throw new Error(
           `Target volume must be between 0.01 ` +
@@ -985,7 +989,7 @@
       }
 
       if (
-        Math.abs(volume - Number(volume.toFixed(3))) > 1e-9
+        volume !== null && Math.abs(volume - Number(volume.toFixed(3))) > 1e-9
       ) {
         throw new Error(
           "Use no more than 3 decimal places for volume."
@@ -1012,6 +1016,13 @@
     // ==========================================
 
     function updateDuration() {
+      const homeReturn = returningHome();
+      $("durationLabel").textContent = homeReturn ? "Stopping point" : "Ideal time from settings";
+      if (homeReturn) {
+        $("duration").textContent = "HOME switch";
+        return;
+      }
+
       let values;
 
       try {
@@ -1120,6 +1131,7 @@
           ? "Target volume"
           : "Reverse travel (mL equivalent)";
 
+      updateDuration();
       updateControls();
     }
 
@@ -1137,6 +1149,11 @@
         !controlsBusy && forceSettingsAvailable && forceSampleUsable;
       const forceReady = direction === "BACKWARD" || !forceSettingsAvailable ||
         forwardForceReady();
+      const homeReturn = returningHome();
+      $("volumeField").hidden = homeReturn;
+      $("startHelp").textContent = homeReturn
+        ? "Backward runs at the selected rate until the HOME switch is pressed."
+        : "Start applies the syringe size, direction, flow rate and target volume in that order.";
 
       if (keyboardJog) {
         const label = JOG_KEYS[keyboardJog.key].toLowerCase();
@@ -1144,7 +1161,7 @@
       } else if (!connected || !freshStatus) {
         $("jogHelp").textContent = "Connect the Arduino and wait for status to use keyboard jog.";
       } else if (jogSpeed === null) {
-        $("jogHelp").textContent = "Keyboard jog requires V3.6 firmware.";
+        $("jogHelp").textContent = "Keyboard jog requires V3.6 or newer firmware.";
       } else if (!idle) {
         $("jogHelp").textContent = "Keyboard jog is available when the pump is idle.";
       } else {
@@ -1179,7 +1196,7 @@
           ? "Applying settings..."
           : (
               direction === "BACKWARD"
-                ? "Start retraction"
+                ? (homeReturn ? "Return to HOME" : "Start retraction")
                 : "Start infusion"
             );
 
@@ -1199,7 +1216,7 @@
         controlsBusy || jogging || alarm;
 
       $("volume").disabled =
-        controlsBusy || (connected && !idle);
+        homeReturn || controlsBusy || (connected && !idle);
 
       $("applyRate").disabled =
         !connected ||
@@ -1209,6 +1226,7 @@
         alarm;
 
       $("applyVolume").disabled =
+        homeReturn ||
         !connected ||
         !freshStatus ||
         controlsBusy ||
@@ -1370,6 +1388,7 @@
     }
 
     function renderStatus(fields) {
+      if (fields.has("STATE")) supportsHomeReturn = fields.get("BACKWARD STOP") === "HOME";
       const reportedDirection = fields.get("DIRECTION");
       showReading("actualDirection",
         ["FORWARD", "BACKWARD"].includes(reportedDirection)
@@ -1378,7 +1397,6 @@
       const reportedSyringe = readNumber(fields, "SYRINGE");
       showReading("actualSyringe", reportedSyringe, " mL");
       showReading("actualRate", readNumber(fields, "FLOW RATE", "mL/min"), " mL/min");
-      showReading("actualVolume", readNumber(fields, "TARGET VOLUME", "mL"), " mL");
       showReading("rpm", readNumber(fields, "CURRENT RPM", "RPM"), " RPM");
 
       const stepMatch = /^(\d+)\s*\/\s*(\d+)$/.exec(fields.get("STEPS") ?? "");
@@ -1386,13 +1404,16 @@
       const target = stepMatch ? Number(stepMatch[2]) : null;
       const hasRun = Number.isSafeInteger(done) && Number.isSafeInteger(target) &&
         target > 0 && done <= target;
+      const runDirection = fields.get("RUN DIRECTION");
+      const homeReturnRun = supportsHomeReturn && runDirection === "BACKWARD" &&
+        Number.isSafeInteger(done) && target === 0;
+      showReading("actualVolume", homeReturnRun ? null : readNumber(fields, "TARGET VOLUME", "mL"), " mL");
       const percent = hasRun ? done / target * 100 : 0;
-      showReading("steps", hasRun ? `${done} / ${target}` : null);
+      showReading("steps", hasRun ? `${done} / ${target}` : homeReturnRun ? done : null);
       const displayPercent = done === target ? percent : Math.min(percent, 99.9);
       showReading("percent", hasRun ? displayPercent.toFixed(1) : null, "%");
       $("progress").style.width = `${percent}%`;
 
-      const runDirection = fields.get("RUN DIRECTION");
       $("deliveredCaption").textContent =
         hasRun && runDirection === "FORWARD" ? "Estimated delivered volume" :
         hasRun && runDirection === "BACKWARD" ? "Estimated reverse travel (mL equivalent)" :
@@ -1400,7 +1421,8 @@
       const delivered = hasRun ? readNumber(fields, "ESTIMATED DELIVERED", "mL") : null;
       showReading("delivered", delivered);
       $("deliveredUnit").hidden = delivered === null;
-      showReading("travel", hasRun ? readNumber(fields, "TRAVEL MM", "mm") : null, " mm");
+      showReading("travel", (hasRun || homeReturnRun) ? readNumber(fields, "TRAVEL MM", "mm") : null, " mm");
+      updateDuration();
 
       const maxFlow = readNumber(fields, "MAX FLOW", "mL/min") ??
         readNumber(fields, "MAX FLOW FOR SYRINGE", "mL/min");
@@ -1450,6 +1472,7 @@
     }
 
     function clearStatus() {
+      if (!connected) supportsHomeReturn = false;
       statusFields = null;
       lastStatusAt = null;
       renderStatus(new Map());
@@ -1556,6 +1579,9 @@
         "JOG STARTED": "JOGGING",
         "JOG STOPPED": "IDLE",
         "JOG TIMEOUT": "IDLE",
+        "JOG HOME REACHED": "IDLE",
+        "JOG MAX REACHED": "IDLE",
+        "HOME REACHED": "COMPLETE",
         "TARGET STEPS COMPLETE": "COMPLETE",
         "DECELERATING TO PAUSE": "PAUSING"
       };
@@ -1566,12 +1592,20 @@
       )) {
         pumpState = states[line];
 
-        if (["JOG STOPPED", "JOG TIMEOUT", "PUMP STOPPED"].includes(line)) {
+        const jogEnded = ["JOG STOPPED", "JOG TIMEOUT", "JOG HOME REACHED", "JOG MAX REACHED"]
+          .includes(line);
+        if (jogEnded || line === "PUMP STOPPED") {
           stopKeyboardJog(false);
           if (line === "JOG TIMEOUT") notice("Jog stopped after hold updates timed out.", true);
+          if (line === "JOG HOME REACHED") notice("HOME reached. Backward jog stopped.");
+          if (line === "JOG MAX REACHED") notice("MAX reached. Forward jog stopped.");
         }
         if (line === "PUMP STARTED") {
           clearStatus();
+        } else if (line === "HOME REACHED") {
+          showReading("rpm", "0.000", " RPM");
+          notice("HOME reached. Backward motion stopped.");
+          requestStatus();
         }
 
         log(`✓ ${line}`);
@@ -1993,7 +2027,7 @@
           );
         }
 
-        if (id === operationId) {
+        if (id === operationId && !(isStart && pumpState === "COMPLETE")) {
           notice(label);
         }
       }
@@ -2056,37 +2090,19 @@
 
       // Each command waits for its firmware acknowledgement.
 
-      await runCommands(
-        [
-          [
-            `SYRINGE ${values.syringe}`,
-            "SYRINGE UPDATED"
-          ],
+      const commands = [
+        [`SYRINGE ${values.syringe}`, "SYRINGE UPDATED"],
+        [`DIRECTION ${direction}`, "DIRECTION UPDATED"],
+        [`RATE ${values.rate.toFixed(6)}`, "FLOW RATE UPDATED"]
+      ];
+      if (values.volume !== null) {
+        commands.push([`VOLUME ${values.volume.toFixed(3)}`, "TARGET VOLUME UPDATED"]);
+      }
+      commands.push(["START", "PUMP STARTED"]);
 
-          [
-            `DIRECTION ${direction}`,
-            "DIRECTION UPDATED"
-          ],
-
-          [
-            `RATE ${values.rate.toFixed(6)}`,
-            "FLOW RATE UPDATED"
-          ],
-
-          [
-            `VOLUME ${values.volume.toFixed(3)}`,
-            "TARGET VOLUME UPDATED"
-          ],
-
-          [
-            "START",
-            "PUMP STARTED"
-          ]
-        ],
-
-        direction === "BACKWARD" ? "Retraction started." : "Infusion started.",
-        true
-      );
+      const label = returningHome() ? "Returning to HOME." :
+        direction === "BACKWARD" ? "Retraction started." : "Infusion started.";
+      await runCommands(commands, label, true);
     }
 
     // ==========================================
@@ -2128,6 +2144,7 @@
     // ==========================================
 
     async function applyVolume() {
+      if (returningHome()) return;
       const value = numericValue("volume");
 
       if (
