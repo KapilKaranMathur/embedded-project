@@ -759,6 +759,49 @@
           Connect the Arduino to begin.
         </div>
 
+        <div id="travelPanel" hidden>
+          <div class="divider"></div>
+          <h2>Travel and switches</h2>
+          <div class="metrics">
+            <div>
+              <div class="eyebrow">HOME switch</div>
+              <div class="metric-value" id="homeSwitch">—</div>
+            </div>
+            <div>
+              <div class="eyebrow">MAX switch</div>
+              <div class="metric-value" id="maxSwitch">—</div>
+            </div>
+            <div>
+              <div class="eyebrow">Estimated position from HOME</div>
+              <div class="metric-value" id="homePosition">—</div>
+            </div>
+            <div>
+              <div class="eyebrow">Recorded HOME to MAX</div>
+              <div class="metric-value" id="measuredMax">—</div>
+            </div>
+            <div>
+              <div class="eyebrow">Forward stop position</div>
+              <div class="metric-value" id="forwardLimit">—</div>
+            </div>
+            <div>
+              <div class="eyebrow">Estimated forward travel left</div>
+              <div class="metric-value" id="forwardRoom">—</div>
+            </div>
+          </div>
+          <p class="helper" id="travelHint"></p>
+          <details>
+            <summary>Record maximum travel</summary>
+            <p class="helper">With the carriage physically at HOME, jog forward to the MAX switch. Enter a clearance checked on the rig before recording MAX. Clear the recorded value to measure again.</p>
+            <div class="force-fields">
+              <label>Clearance before MAX (mm)
+                <input id="maxClearance" type="text" inputmode="decimal">
+              </label>
+            </div>
+            <button type="button" class="btn" id="recordMax" disabled>Record MAX</button>
+            <button type="button" class="btn" id="clearMax" disabled>Clear MAX</button>
+          </details>
+        </div>
+
         <div class="divider"></div>
         <h2>Load cell diagnostics</h2>
         <p class="helper" id="forceHealth">Connect the Arduino to view sensor status.</p>
@@ -846,6 +889,8 @@
     let jogSpeed = null;
     let keyboardJog = null;
     let supportsHomeReturn = false;
+    let maxCaptureReady = false;
+    let maxTravelRecorded = false;
     let forceSettingsAvailable = false;
     let forceCalibrated = false;
     let forceSampleUsable = false;
@@ -1190,6 +1235,9 @@
       $("calibrateForce").disabled = !forceConfigAllowed;
       $("tareForce").disabled = !forceConfigAllowed || !forceCalibrated;
       $("setForceLimit").disabled = !forceConfigAllowed || !forceCalibrated;
+      const travelConfigAllowed = connected && freshStatus && idle && !controlsBusy;
+      $("recordMax").disabled = !travelConfigAllowed || !maxCaptureReady;
+      $("clearMax").disabled = !travelConfigAllowed || !maxTravelRecorded;
 
       $("startBtn").textContent =
         busy
@@ -1387,6 +1435,29 @@
       $(id).textContent = value === null ? "—" : `${value}${unit}`;
     }
 
+    function renderTravel(fields) {
+      const home = fields.get("HOME SWITCH");
+      const max = fields.get("MAX SWITCH");
+      const switchText = { PRESSED: "Pressed", RELEASED: "Released" };
+      const position = readNumber(fields, "POSITION MM");
+      const measuredMax = readNumber(fields, "MAX TRAVEL MM");
+      maxCaptureReady = fields.get("MAX CAPTURE READY") === "YES";
+      maxTravelRecorded = measuredMax !== null;
+      $("travelPanel").hidden = !fields.has("HOME SWITCH") || !fields.has("MAX SWITCH");
+      showReading("homeSwitch", Object.hasOwn(switchText, home) ? switchText[home] : null);
+      showReading("maxSwitch", Object.hasOwn(switchText, max) ? switchText[max] : null);
+      showReading("homePosition", position, " mm");
+      showReading("measuredMax", measuredMax, " mm");
+      showReading("forwardLimit", readNumber(fields, "FORWARD LIMIT MM"), " mm");
+      showReading("forwardRoom", readNumber(fields, "FORWARD ROOM MM"), " mm");
+      $("travelHint").textContent = position === null
+        ? "Return to HOME to establish the position."
+        : maxCaptureReady
+          ? "MAX reached by jog. Enter your verified clearance to record it."
+          : maxTravelRecorded ? "Forward travel is limited to the recorded stop position."
+          : "Record MAX to set a forward travel limit.";
+    }
+
     function renderStatus(fields) {
       if (fields.has("STATE")) supportsHomeReturn = fields.get("BACKWARD STOP") === "HOME";
       const reportedDirection = fields.get("DIRECTION");
@@ -1459,6 +1530,7 @@
       forceSampleUsable = validForce && forceStatus === "OK";
       forceCutoff = readNumber(fields, "FORCE LIMIT N");
       jogSpeed = readNumber(fields, "JOG SPEED MM S");
+      renderTravel(fields);
       $("forceSetup").hidden = !forceSettingsAvailable;
       showReading("forceNewtons", forceCalibrated && forceSampleUsable
         ? readNumber(fields, "FORCE N") : null, " N");
@@ -1581,6 +1653,7 @@
         "JOG TIMEOUT": "IDLE",
         "JOG HOME REACHED": "IDLE",
         "JOG MAX REACHED": "IDLE",
+        "JOG TRAVEL LIMIT": "IDLE",
         "HOME REACHED": "COMPLETE",
         "TARGET STEPS COMPLETE": "COMPLETE",
         "DECELERATING TO PAUSE": "PAUSING"
@@ -1592,13 +1665,15 @@
       )) {
         pumpState = states[line];
 
-        const jogEnded = ["JOG STOPPED", "JOG TIMEOUT", "JOG HOME REACHED", "JOG MAX REACHED"]
+        const jogEnded = ["JOG STOPPED", "JOG TIMEOUT", "JOG HOME REACHED", "JOG MAX REACHED", "JOG TRAVEL LIMIT"]
           .includes(line);
         if (jogEnded || line === "PUMP STOPPED") {
           stopKeyboardJog(false);
           if (line === "JOG TIMEOUT") notice("Jog stopped after hold updates timed out.", true);
           if (line === "JOG HOME REACHED") notice("HOME reached. Backward jog stopped.");
           if (line === "JOG MAX REACHED") notice("MAX reached. Forward jog stopped.");
+          if (line === "JOG TRAVEL LIMIT") notice("Forward travel limit reached. Jog stopped.");
+          if (jogEnded && line !== "JOG STOPPED" && connected) requestStatus();
         }
         if (line === "PUMP STARTED") {
           clearStatus();
@@ -1880,6 +1955,19 @@
 
     function requestStatus() {
       sendLine("STATUS").catch(error => notice(error.message, true));
+    }
+
+    function recordMaxTravel() {
+      const clearance = numericValue("maxClearance");
+      if (!(clearance > 0)) {
+        notice("Enter the verified clearance before MAX in millimetres.", true);
+        return;
+      }
+
+      return runCommands(
+        [[`TRAVEL MAX ${$("maxClearance").value.trim()}`, "MAX TRAVEL RECORDED"]],
+        "MAX recorded and forward travel limit set."
+      );
     }
 
     function forwardForceReady() {
@@ -2288,6 +2376,10 @@
     );
 
     $("testAlarmSound").addEventListener("click", () => enableAlarmSound(true));
+    $("recordMax").addEventListener("click", recordMaxTravel);
+    $("clearMax").addEventListener("click", () =>
+      runCommands([["TRAVEL CLEAR", "MAX TRAVEL CLEARED"]], "Recorded MAX cleared.")
+    );
     $("calibrateForce").addEventListener("click", saveForceCalibration);
     $("setForceLimit").addEventListener("click", saveForceLimit);
     $("tareForce").addEventListener("click", () =>
