@@ -6,7 +6,7 @@
 #include "ForceSensor.h"
 
 // =====================================================
-// SYRINGE PUMP V3.5
+// SYRINGE PUMP V3.6
 // Arduino Mega 2560 + RAMPS 1.4 + A4988
 // FORWARD / BACKWARD MOTOR CONTROL
 // Non-medical benchtop prototype
@@ -30,9 +30,11 @@ const float STEPS_PER_MM = 400.0f;
 const float MAX_STEP_HZ = 1000.0f;
 const float MIN_STEP_HZ = 0.01f;
 const float ACCEL = 800.0f;
+const float JOG_STEP_HZ = 400.0f;
 
 const unsigned long MIN_STEP_US = 1000UL;
 const unsigned long LINK_TIMEOUT_MS = 15000UL;
+const unsigned long JOG_TIMEOUT_MS = 400UL;
 
 // Syringe settings — provisional dimensions
 int syringeSize = 20;
@@ -48,6 +50,7 @@ enum PumpState {
   RUNNING,
   PAUSING,
   PAUSED,
+  JOGGING,
   COMPLETE,
   ALARM
 };
@@ -60,6 +63,9 @@ enum Direction {
 PumpState state = IDLE;
 Direction direction = FORWARD;
 Direction runDirection = FORWARD;
+Direction jogDirection = FORWARD;
+bool jogMotorEnabled = false;
+unsigned long lastJogKeepMs = 0;
 const char* alarmReason = nullptr;
 
 // Motion variables
@@ -150,6 +156,7 @@ void disableMotor() {
   digitalWrite(STEP_PIN, LOW);
   digitalWrite(EN_PIN, HIGH);
 
+  jogMotorEnabled = false;
   currentHz = 0.0f;
   stepCredit = 0.0f;
 }
@@ -185,37 +192,59 @@ void stopPump() {
 // START
 // =====================================================
 
-void startPump() {
+bool motionAvailable() {
   if (state == ALARM) {
     Serial.println(F("ERROR: RESET REQUIRED"));
-    return;
+    return false;
   }
 
   if (state != IDLE && state != COMPLETE) {
     Serial.println(F("ERROR: STOP FIRST"));
-    return;
+    return false;
   }
 
   if (limitPressed()) {
     triggerAlarm("LIMIT SWITCH");
-    return;
+    return false;
   }
+  return true;
+}
+
+bool checkForwardForce(Direction requested) {
+  if (requested != FORWARD) return true;
+
+  if (!forceLimitConfigured()) {
+    Serial.println(F("ERROR: CALIBRATE FORCE AND SET A LIMIT BEFORE FORWARD START"));
+    return false;
+  }
+  if (const char* fault = forceFault()) {
+    triggerAlarm(fault);
+    return false;
+  }
+  return true;
+}
+
+void enableMotion(Direction requested) {
+  currentHz = 0.0f;
+  stepCredit = 0.0f;
+
+  digitalWrite(STEP_PIN, LOW);
+  digitalWrite(DIR_PIN, requested == FORWARD ? LOW : HIGH);
+  delayMicroseconds(5);
+  digitalWrite(EN_PIN, LOW);
+
+  lastUpdateUs = micros();
+  lastStepUs = lastUpdateUs;
+}
+
+void startPump() {
+  if (!motionAvailable()) return;
 
   if (!validRate(flowRate)) {
     Serial.println(F("ERROR: INVALID FLOW RATE"));
     return;
   }
-
-  if (direction == FORWARD) {
-    if (!forceLimitConfigured()) {
-      Serial.println(F("ERROR: CALIBRATE FORCE AND SET A LIMIT BEFORE FORWARD START"));
-      return;
-    }
-    if (const char* fault = forceFault()) {
-      triggerAlarm(fault);
-      return;
-    }
-  }
+  if (!checkForwardForce(direction)) return;
 
   float requestedSteps = targetVolume * stepsPerML;
 
@@ -230,29 +259,50 @@ void startPump() {
   runDirection = direction;
   resetForcePeak();
 
-  currentHz = 0.0f;
-  stepCredit = 0.0f;
-
-  digitalWrite(STEP_PIN, LOW);
-
-  // Direction LOW selects forward and HIGH selects backward.
-  digitalWrite(
-  DIR_PIN,
-  direction == FORWARD ? LOW : HIGH
-);
-
-  delayMicroseconds(5);
-
-  // Enable A4988 (active LOW)
-  digitalWrite(EN_PIN, LOW);
-
-  lastUpdateUs = micros();
-  lastStepUs = lastUpdateUs;
+  enableMotion(direction);
   lastContactMs = millis();
 
   state = RUNNING;
 
   Serial.println(F("PUMP STARTED"));
+}
+
+void finishJog(bool timedOut) {
+  if (state != JOGGING) return;
+  disableMotor();
+  state = IDLE;
+  Serial.println(timedOut ? F("JOG TIMEOUT") : F("JOG STOPPED"));
+}
+
+void prepareJog(Direction requested) {
+  if (!motionAvailable() || !checkForwardForce(requested)) return;
+
+  jogDirection = requested;
+  lastJogKeepMs = millis();
+  state = JOGGING;
+  // An acknowledged direction alone does not enable the driver.
+  Serial.println(F("JOG READY"));
+}
+
+void keepJog() {
+  if (state != JOGGING) return;
+  const unsigned long now = millis();
+  if (now - lastJogKeepMs >= JOG_TIMEOUT_MS) {
+    finishJog(true);
+    return;
+  }
+
+  if (!jogMotorEnabled) {
+    if (limitPressed()) {
+      triggerAlarm("LIMIT SWITCH");
+      return;
+    }
+    if (!checkForwardForce(jogDirection)) return;
+    enableMotion(jogDirection);
+    jogMotorEnabled = true;
+    Serial.println(F("JOG STARTED"));
+  }
+  lastJogKeepMs = now;
 }
 
 // =====================================================
@@ -305,7 +355,8 @@ void completeDose() {
 // =====================================================
 
 void updateMotion() {
-  if (state != RUNNING && state != PAUSING) {
+  const bool jogging = state == JOGGING && jogMotorEnabled;
+  if (!jogging && state != RUNNING && state != PAUSING) {
     return;
   }
 
@@ -325,23 +376,17 @@ void updateMotion() {
 
   float dt = elapsedUs / 1000000.0f;
 
-  if (deliveredSteps >= targetSteps) {
+  if (!jogging && deliveredSteps >= targetSteps) {
     completeDose();
     return;
   }
 
-  unsigned long remaining =
-    targetSteps - deliveredSteps;
-
-  float desiredHz =
-    state == RUNNING ? rateHz(flowRate) : 0.0f;
-
-  // Deceleration near the target.
-  float stoppingHz =
-    sqrtf(2.0f * ACCEL * remaining);
-
-  if (desiredHz > stoppingHz) {
-    desiredHz = stoppingHz;
+  float desiredHz = JOG_STEP_HZ;
+  if (!jogging) {
+    const unsigned long remaining = targetSteps - deliveredSteps;
+    desiredHz = state == RUNNING ? rateHz(flowRate) : 0.0f;
+    const float stoppingHz = sqrtf(2.0f * ACCEL * remaining);
+    if (desiredHz > stoppingHz) desiredHz = stoppingHz;
   }
 
   // Acceleration / deceleration
@@ -386,12 +431,14 @@ void updateMotion() {
 
     lastStepUs = micros();
 
-    ++deliveredSteps;
     stepCredit -= 1.0f;
 
-    if (deliveredSteps >= targetSteps) {
-      completeDose();
-      return;
+    if (!jogging) {
+      ++deliveredSteps;
+      if (deliveredSteps >= targetSteps) {
+        completeDose();
+        return;
+      }
     }
   }
 
@@ -414,6 +461,11 @@ void updateMotion() {
 // =====================================================
 
 void checkWatchdog() {
+  if (state == JOGGING) {
+    if (millis() - lastJogKeepMs >= JOG_TIMEOUT_MS) finishJog(true);
+    return;
+  }
+
   bool active =
     state == RUNNING ||
     state == PAUSING ||
@@ -441,6 +493,7 @@ const char* stateName() {
     case RUNNING: return "RUNNING";
     case PAUSING: return "PAUSING";
     case PAUSED: return "PAUSED";
+    case JOGGING: return "JOGGING";
     case COMPLETE: return "COMPLETE";
     case ALARM: return "ALARM";
   }
@@ -498,6 +551,13 @@ void printStatus() {
   Serial.print(F("MAX FLOW: "));
   Serial.println(maxRate(), 3);
 
+  Serial.print(F("JOG SPEED MM S: "));
+  Serial.println(JOG_STEP_HZ / STEPS_PER_MM, 2);
+  if (state == JOGGING) {
+    Serial.print(F("JOG DIRECTION: "));
+    Serial.println(jogDirection == FORWARD ? F("FORWARD") : F("BACKWARD"));
+  }
+
   printForceStatus();
   Serial.println(F("---------------------------"));
 }
@@ -553,6 +613,20 @@ void processCommand(char* command) {
 
   else if (strcmp(command, "FORCE") == 0) {
     processForceCommand(argument, state == IDLE || state == COMPLETE);
+  }
+
+  else if (strcmp(command, "JOG") == 0) {
+    if (argument && strcmp(argument, "FORWARD") == 0) {
+      prepareJog(FORWARD);
+    } else if (argument && strcmp(argument, "BACKWARD") == 0) {
+      prepareJog(BACKWARD);
+    } else if (argument && strcmp(argument, "KEEP") == 0) {
+      keepJog();
+    } else if (argument && strcmp(argument, "STOP") == 0) {
+      finishJog(false);
+    } else {
+      Serial.println(F("ERROR: INVALID JOG COMMAND"));
+    }
   }
 
   // ---------------- PING ----------------
@@ -783,7 +857,7 @@ void setup() {
   lastContactMs = millis();
   lastUpdateUs = micros();
 
-  Serial.println(F("SYRINGE PUMP V3.5 READY"));
+  Serial.println(F("SYRINGE PUMP V3.6 READY"));
   Serial.println(
     F("DIRECTION: FORWARD / BACKWARD")
   );
@@ -807,7 +881,8 @@ void loop() {
   checkWatchdog();
   const bool active = state == RUNNING || state == PAUSING || state == PAUSED;
   updateForceSensor(active);
-  if (active && runDirection == FORWARD) {
+  const bool forwardJog = state == JOGGING && jogMotorEnabled && jogDirection == FORWARD;
+  if ((active && runDirection == FORWARD) || forwardJog) {
     if (const char* fault = forceFault()) {
       triggerAlarm(fault);
     }
