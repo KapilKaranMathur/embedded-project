@@ -862,7 +862,7 @@
             <label>Bench-validated cutoff (N) <input id="forceLimit" type="number" min="0.001" max="196.133" step="any"></label>
           </div>
           <button type="button" class="btn" id="setForceLimit" disabled>Set cutoff</button>
-          <p class="helper">Reset, recalibration and tare require setting the cutoff again.</p>
+          <p class="helper" id="forceStorageHelp">Reset, recalibration and tare require setting the cutoff again.</p>
         </details>
 
       </section>
@@ -1608,6 +1608,7 @@
       showReading("forceAge", sample.age, " ms");
       forceSettingsAvailable = ["YES", "NO"].includes(fields.get("FORCE CALIBRATED"));
       forceCalibrated = fields.get("FORCE CALIBRATED") === "YES";
+      const storesCalibration = fields.get("FORCE CAL STORAGE") === "EEPROM";
       forceSampleUsable = sample.usable;
       forceCutoff = readNumber(fields, "FORCE LIMIT N");
       jogSpeed = readNumber(fields, "JOG SPEED MM S");
@@ -1620,8 +1621,12 @@
       $("forceProtection").textContent = !forceSettingsAvailable
         ? (lastStatusAt !== null ? "Force cutoff unavailable on this firmware." : "")
         : !forceCalibrated ? "Calibrate force to enable a forward run."
-        : forceCutoff === null ? "Set the validated force cutoff to enable a forward run."
-        : `Forward force cutoff: ${forceCutoff} N.`;
+        : (storesCalibration ? "Calibration saved on the Mega. " : "") +
+          (forceCutoff === null ? "Set the validated force cutoff to enable a forward run."
+            : `Forward force cutoff set to ${forceCutoff} N.`);
+      $("forceStorageHelp").textContent = storesCalibration
+        ? "Calibration and tare are saved on the Mega. Set the cutoff again after reset, calibration or tare."
+        : "Reset, recalibration and tare require setting the cutoff again.";
     }
 
     function clearStatus() {
