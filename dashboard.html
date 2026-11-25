@@ -669,6 +669,7 @@
           Start applies the syringe size, direction,
           flow rate and target volume in that order.
         </p>
+        <button type="button" class="btn" id="openForceSetup" hidden>Set up forward motion</button>
       </section>
 
       <!-- MONITORING -->
@@ -841,13 +842,20 @@
         <span class="helper" id="alarmSoundState" role="status"></span>
 
         <details class="force-setup" id="forceSetup" hidden>
-          <summary>Calibrate force and set cutoff</summary>
-          <p class="helper">With the motor disabled, record the unloaded count and the count under a known compression load.</p>
+          <summary id="forceSetupSummary">Calibrate force and set cutoff</summary>
+          <p class="helper">With external motor power off, remove the load and wait for the count to settle. Capture the unloaded reading. Then apply a known mass in compression, wait for the count to settle and capture the loaded reading.</p>
           <div class="force-fields">
-            <label>Unloaded count <input id="forceZero" type="number" step="1"></label>
-            <label>Loaded count <input id="forceLoaded" type="number" step="1"></label>
+            <div>
+              <label>Unloaded count <input id="forceZero" type="number" step="1"></label>
+              <button type="button" class="btn" id="captureUnloaded" disabled>Capture unloaded</button>
+            </div>
+            <div>
+              <label>Loaded count <input id="forceLoaded" type="number" step="1"></label>
+              <button type="button" class="btn" id="captureLoaded" disabled>Capture loaded</button>
+            </div>
             <label>Reference mass (kg) <input id="forceMass" type="number" min="0.000001" max="20" step="any"></label>
           </div>
+          <p class="helper" id="forceCaptureNotice" role="status"></p>
           <button type="button" class="btn" id="calibrateForce" disabled>Save calibration</button>
           <button type="button" class="btn" id="tareForce" disabled>Tare unloaded cell</button>
           <div class="force-fields">
@@ -1223,14 +1231,8 @@
       const controlsBusy = busy || keyboardJog !== null;
       const forceConfigAllowed = connected && freshStatus && idle &&
         !controlsBusy && forceSettingsAvailable && forceSampleUsable;
-      const forwardReady = forwardForceReady();
-      const forceReady = direction === "BACKWARD" || !forceSettingsAvailable || forwardReady;
-      let forwardBlock = "";
-      if (forceSettingsAvailable && !forwardReady) {
-        if (!forceCalibrated) forwardBlock = "Calibrate the load cell to enable forward motion.";
-        else if (forceCutoff === null) forwardBlock = "Set a validated force cutoff to enable forward motion.";
-        else forwardBlock = "Forward motion needs a fresh force reading.";
-      }
+      const forwardBlock = forwardForceBlock();
+      const forceReady = direction === "BACKWARD" || !forceSettingsAvailable || !forwardBlock;
       const homeReturn = returningHome();
       const retract = usingRetractSpeed();
       $("volumeField").hidden = homeReturn;
@@ -1244,6 +1246,8 @@
         : homeReturn
         ? "Backward runs at the selected rate until the HOME switch is pressed."
         : "Start applies the syringe size, direction, flow rate and target volume in that order.";
+      $("openForceSetup").hidden = !connected || !freshStatus || !idle || controlsBusy ||
+        !forceSettingsAvailable || !forwardBlock;
 
       if (keyboardJog) {
         const label = JOG_KEYS[keyboardJog.key].toLowerCase();
@@ -1257,9 +1261,7 @@
       } else {
         const backwardSpeed = retractMaxSpeed ?? jogSpeed;
         $("jogHelp").textContent = `Hold ← to jog backward up to ${backwardSpeed} mm/s or → to jog forward up to ${jogSpeed} mm/s. Release to stop.`;
-        if (!forwardReady) {
-          $("jogHelp").textContent += ` ${forwardBlock || "Forward jog requires force calibration and a cutoff."}`;
-        }
+        if (forwardBlock) $("jogHelp").textContent += ` ${forwardBlock}`;
       }
 
       $("connectBtn").textContent =
@@ -1279,6 +1281,8 @@
         !connected || !freshStatus || !idle || controlsBusy || !forceReady;
 
       $("calibrateForce").disabled = !forceConfigAllowed;
+      $("captureUnloaded").disabled = !forceConfigAllowed;
+      $("captureLoaded").disabled = !forceConfigAllowed;
       $("tareForce").disabled = !forceConfigAllowed || !forceCalibrated;
       $("setForceLimit").disabled = !forceConfigAllowed || !forceCalibrated;
       const travelConfigAllowed = connected && freshStatus && idle && !controlsBusy;
@@ -1369,6 +1373,7 @@
     function cancelOperation(reason = "Cancelled") {
       operationId++;
       busy = false;
+      $("forceCaptureNotice").textContent = "";
 
       if (pendingAck) {
         const waiting = pendingAck;
@@ -1464,6 +1469,14 @@
       });
     }
 
+    function finishReply(line, data) {
+      if (pendingAck?.expected !== line) return;
+      const waiting = pendingAck;
+      pendingAck = null;
+      clearTimeout(waiting.timeout);
+      waiting.resolve(data);
+    }
+
     // ==========================================
     // PROCESS ARDUINO RESPONSES
     // ==========================================
@@ -1482,6 +1495,18 @@
 
     function showReading(id, value, unit = "") {
       $(id).textContent = value === null ? "—" : `${value}${unit}`;
+    }
+
+    function readForceSample(fields) {
+      const health = fields.get("FORCE SENSOR");
+      const raw = fields.get("FORCE RAW");
+      const count = /^-?\d+$/.test(raw ?? "") ? Number(raw) : null;
+      const age = readNumber(fields, "FORCE SAMPLE AGE MS");
+      const reported = ["OK", "SATURATED"].includes(health) &&
+        Number.isInteger(count) && count >= -8388608 && count <= 8388607 &&
+        age !== null && Number(age) < 1000;
+      return { count: reported ? count : null, age: reported ? age : null,
+        usable: reported && health === "OK" && count > -8388608 && count < 8388607 };
     }
 
     function renderTravel(fields) {
@@ -1578,17 +1603,12 @@
           ? "The board did not report HX711 diagnostics."
           : connected ? "Waiting for Arduino status."
           : "Connect the Arduino to view sensor status.";
-      const raw = fields.get("FORCE RAW");
-      const count = /^-?\d+$/.test(raw ?? "") ? Number(raw) : null;
-      const age = readNumber(fields, "FORCE SAMPLE AGE MS");
-      const validForce = ["OK", "SATURATED"].includes(forceStatus) &&
-        Number.isInteger(count) && count >= -8388608 && count <= 8388607 &&
-        age !== null && Number(age) < 1000;
-      showReading("forceRaw", validForce ? count : null);
-      showReading("forceAge", validForce ? age : null, " ms");
+      const sample = readForceSample(fields);
+      showReading("forceRaw", sample.count);
+      showReading("forceAge", sample.age, " ms");
       forceSettingsAvailable = ["YES", "NO"].includes(fields.get("FORCE CALIBRATED"));
       forceCalibrated = fields.get("FORCE CALIBRATED") === "YES";
-      forceSampleUsable = validForce && forceStatus === "OK";
+      forceSampleUsable = sample.usable;
       forceCutoff = readNumber(fields, "FORCE LIMIT N");
       jogSpeed = readNumber(fields, "JOG SPEED MM S");
       renderTravel(fields);
@@ -1608,6 +1628,7 @@
       if (!connected) {
         supportsHomeReturn = false;
         retractMaxSpeed = null;
+        $("forceCaptureNotice").textContent = "";
       }
       statusFields = null;
       lastStatusAt = null;
@@ -1655,6 +1676,7 @@
             if (awaitingStatus && ["IDLE", "COMPLETE"].includes(pumpState)) {
               notice("Arduino status received.");
             }
+            finishReply(line, fields);
           }
         }
         return;
@@ -1762,18 +1784,7 @@
         log(`✓ ${line}`);
       }
 
-      // Finish waiting command only on exact match.
-      if (
-        pendingAck &&
-        line === pendingAck.expected
-      ) {
-        const waiting = pendingAck;
-
-        pendingAck = null;
-        clearTimeout(waiting.timeout);
-
-        waiting.resolve();
-      }
+      finishReply(line);
     }
 
     // ==========================================
@@ -2034,8 +2045,18 @@
       );
     }
 
-    function forwardForceReady() {
-      return forceCalibrated && forceCutoff !== null && forceSampleUsable;
+    function forwardForceBlock() {
+      if (!forceSettingsAvailable) return "The firmware does not report forward force protection.";
+      if (!forceCalibrated) return "Calibrate the load cell to enable forward motion.";
+      if (forceCutoff === null) return "Set a validated force cutoff to enable forward motion.";
+      if (!forceSampleUsable) return "Forward needs a fresh load cell reading. Check the load cell diagnostics.";
+      return "";
+    }
+
+    function showForceSetup() {
+      if ($("forceSetup").hidden) return;
+      $("forceSetup").open = true;
+      $("forceSetupSummary").focus();
     }
 
     function isEditingField(target) {
@@ -2093,9 +2114,13 @@
           !["IDLE", "COMPLETE"].includes(pumpState)) return;
 
       event.preventDefault();
-      if (requested === "FORWARD" && !forwardForceReady()) {
-        notice("Forward jog requires a fresh calibrated force reading and a cutoff.", true);
-        return;
+      if (requested === "FORWARD") {
+        const block = forwardForceBlock();
+        if (block) {
+          notice(block);
+          showForceSetup();
+          return;
+        }
       }
 
       const hold = { key: event.key, timer: null, confirmed: false, writePending: false };
@@ -2118,6 +2143,36 @@
       }
     }
 
+    async function captureForceCount(inputId) {
+      expireStatus();
+      if (!connected || lastStatusAt === null || busy || keyboardJog ||
+          !["IDLE", "COMPLETE"].includes(pumpState) || !forceSettingsAvailable || !forceSampleUsable) return;
+
+      const id = ++operationId;
+      busy = true;
+      $("forceCaptureNotice").textContent = "Reading the load cell…";
+      updateControls();
+      try {
+        const fields = await expectReply("STATUS", "---------------------------");
+        if (id !== operationId) return;
+        const sample = readForceSample(fields);
+        if (!sample.usable || !["IDLE", "COMPLETE"].includes(fields.get("STATE"))) {
+          throw new Error("Reading unavailable. Let the pump stop and wait for a fresh load cell sample.");
+        }
+        $(inputId).value = String(sample.count);
+        $("forceCaptureNotice").textContent = inputId === "forceZero"
+          ? "Unloaded count captured. Apply the known mass and capture the loaded count."
+          : "Loaded count captured. Enter the known mass and save calibration.";
+      } catch (error) {
+        if (id === operationId) $("forceCaptureNotice").textContent = error.message;
+      } finally {
+        if (id === operationId) {
+          busy = false;
+          updateControls();
+        }
+      }
+    }
+
     function saveForceCalibration() {
       const zeroText = $("forceZero").value.trim();
       const loadedText = $("forceLoaded").value.trim();
@@ -2132,6 +2187,7 @@
         return;
       }
 
+      $("forceCaptureNotice").textContent = "";
       return runCommands(
         [[`FORCE CAL ${zero} ${loaded} ${mass.toFixed(6)}`, "FORCE CALIBRATED"]],
         "Force calibrated. Set your validated cutoff before a forward run."
@@ -2467,6 +2523,9 @@
     $("clearMax").addEventListener("click", () =>
       runCommands([["TRAVEL CLEAR", "MAX TRAVEL CLEARED"]], "Recorded MAX cleared.")
     );
+    $("openForceSetup").addEventListener("click", showForceSetup);
+    $("captureUnloaded").addEventListener("click", () => captureForceCount("forceZero"));
+    $("captureLoaded").addEventListener("click", () => captureForceCount("forceLoaded"));
     $("calibrateForce").addEventListener("click", saveForceCalibration);
     $("setForceLimit").addEventListener("click", saveForceLimit);
     $("tareForce").addEventListener("click", () =>
