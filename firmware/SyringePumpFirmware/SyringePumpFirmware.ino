@@ -6,7 +6,7 @@
 #include "ForceSensor.h"
 
 // =====================================================
-// SYRINGE PUMP V3.6
+// SYRINGE PUMP V3.7
 // Arduino Mega 2560 + RAMPS 1.4 + A4988
 // FORWARD / BACKWARD MOTOR CONTROL
 // Non-medical benchtop prototype
@@ -63,6 +63,7 @@ enum Direction {
 PumpState state = IDLE;
 Direction direction = FORWARD;
 Direction runDirection = FORWARD;
+bool returnRun = false;
 Direction jogDirection = FORWARD;
 bool jogMotorEnabled = false;
 unsigned long lastJogKeepMs = 0;
@@ -143,10 +144,11 @@ bool positiveNumber(const char* text, float &out) {
 // Released = LOW
 // Pressed  = HIGH
 
-bool limitPressed() {
-  return digitalRead(HOME_PIN) == HIGH ||
-         digitalRead(MAX_PIN) == HIGH;
-}
+bool homePressed() { return digitalRead(HOME_PIN) == HIGH; }
+bool maxPressed() { return digitalRead(MAX_PIN) == HIGH; }
+bool limitPressed() { return homePressed() || maxPressed(); }
+bool bothLimitsPressed() { return homePressed() && maxPressed(); }
+bool runActive() { return state == RUNNING || state == PAUSING || state == PAUSED; }
 
 // =====================================================
 // MOTOR SAFETY
@@ -203,10 +205,6 @@ bool motionAvailable() {
     return false;
   }
 
-  if (limitPressed()) {
-    triggerAlarm("LIMIT SWITCH");
-    return false;
-  }
   return true;
 }
 
@@ -237,8 +235,33 @@ void enableMotion(Direction requested) {
   lastStepUs = lastUpdateUs;
 }
 
+bool returnPathClear() {
+  if (bothLimitsPressed()) {
+    triggerAlarm("BOTH LIMIT SWITCHES ACTIVE");
+    return false;
+  }
+  if (!homePressed()) return true;
+
+  if (runActive()) {
+    disableMotor();
+    state = COMPLETE;
+    Serial.println(F("HOME REACHED"));
+  } else {
+    Serial.println(F("ERROR: HOME LIMIT ACTIVE"));
+  }
+  return false;
+}
+
 void startPump() {
   if (!motionAvailable()) return;
+
+  const bool returning = direction == BACKWARD;
+  if (returning) {
+    if (!returnPathClear()) return;
+  } else if (limitPressed()) {
+    Serial.println(F("ERROR: LIMIT SWITCH ACTIVE. JOG AWAY FIRST"));
+    return;
+  }
 
   if (!validRate(flowRate)) {
     Serial.println(F("ERROR: INVALID FLOW RATE"));
@@ -246,17 +269,20 @@ void startPump() {
   }
   if (!checkForwardForce(direction)) return;
 
-  float requestedSteps = targetVolume * stepsPerML;
-
-  if (!(requestedSteps >= 1.0f &&
-        requestedSteps <= 4000000000.0f)) {
-    Serial.println(F("ERROR: INVALID TARGET"));
-    return;
+  unsigned long moveTarget = 0;
+  if (!returning) {
+    const float requestedSteps = targetVolume * stepsPerML;
+    if (!(requestedSteps >= 1.0f && requestedSteps <= 4000000000.0f)) {
+      Serial.println(F("ERROR: INVALID TARGET"));
+      return;
+    }
+    moveTarget = (unsigned long)(requestedSteps + 0.5f);
   }
 
-  targetSteps = (unsigned long)(requestedSteps + 0.5f);
+  targetSteps = moveTarget;
   deliveredSteps = 0;
   runDirection = direction;
+  returnRun = returning;
   resetForcePeak();
 
   enableMotion(direction);
@@ -267,15 +293,34 @@ void startPump() {
   Serial.println(F("PUMP STARTED"));
 }
 
-void finishJog(bool timedOut) {
+void finishJog(const __FlashStringHelper* message) {
   if (state != JOGGING) return;
   disableMotor();
   state = IDLE;
-  Serial.println(timedOut ? F("JOG TIMEOUT") : F("JOG STOPPED"));
+  Serial.println(message);
+}
+
+bool jogPathClear(Direction requested) {
+  const bool home = homePressed();
+  const bool max = maxPressed();
+  if (home && max) {
+    triggerAlarm("BOTH LIMIT SWITCHES ACTIVE");
+    return false;
+  }
+
+  const bool towardHome = requested == BACKWARD;
+  if (!(towardHome ? home : max)) return true;
+
+  if (state == JOGGING) {
+    finishJog(towardHome ? F("JOG HOME REACHED") : F("JOG MAX REACHED"));
+  } else {
+    Serial.println(towardHome ? F("ERROR: HOME LIMIT ACTIVE") : F("ERROR: MAX LIMIT ACTIVE"));
+  }
+  return false;
 }
 
 void prepareJog(Direction requested) {
-  if (!motionAvailable() || !checkForwardForce(requested)) return;
+  if (!motionAvailable() || !jogPathClear(requested) || !checkForwardForce(requested)) return;
 
   jogDirection = requested;
   lastJogKeepMs = millis();
@@ -288,15 +333,12 @@ void keepJog() {
   if (state != JOGGING) return;
   const unsigned long now = millis();
   if (now - lastJogKeepMs >= JOG_TIMEOUT_MS) {
-    finishJog(true);
+    finishJog(F("JOG TIMEOUT"));
     return;
   }
 
   if (!jogMotorEnabled) {
-    if (limitPressed()) {
-      triggerAlarm("LIMIT SWITCH");
-      return;
-    }
+    if (!jogPathClear(jogDirection)) return;
     if (!checkForwardForce(jogDirection)) return;
     enableMotion(jogDirection);
     jogMotorEnabled = true;
@@ -325,7 +367,9 @@ void resumePump() {
     return;
   }
 
-  if (limitPressed()) {
+  if (returnRun) {
+    if (!returnPathClear()) return;
+  } else if (limitPressed()) {
     triggerAlarm("LIMIT SWITCH");
     return;
   }
@@ -356,6 +400,7 @@ void completeDose() {
 
 void updateMotion() {
   const bool jogging = state == JOGGING && jogMotorEnabled;
+  const bool volumeLimited = !jogging && !returnRun;
   if (!jogging && state != RUNNING && state != PAUSING) {
     return;
   }
@@ -376,15 +421,14 @@ void updateMotion() {
 
   float dt = elapsedUs / 1000000.0f;
 
-  if (!jogging && deliveredSteps >= targetSteps) {
+  if (volumeLimited && deliveredSteps >= targetSteps) {
     completeDose();
     return;
   }
 
-  float desiredHz = JOG_STEP_HZ;
-  if (!jogging) {
+  float desiredHz = jogging ? JOG_STEP_HZ : state == RUNNING ? rateHz(flowRate) : 0.0f;
+  if (volumeLimited) {
     const unsigned long remaining = targetSteps - deliveredSteps;
-    desiredHz = state == RUNNING ? rateHz(flowRate) : 0.0f;
     const float stoppingHz = sqrtf(2.0f * ACCEL * remaining);
     if (desiredHz > stoppingHz) desiredHz = stoppingHz;
   }
@@ -420,7 +464,11 @@ void updateMotion() {
     stepCredit >= 1.0f &&
     (unsigned long)(now - lastStepUs) >= MIN_STEP_US
   ) {
-    if (limitPressed()) {
+    if (jogging) {
+      if (!jogPathClear(jogDirection)) return;
+    } else if (returnRun) {
+      if (!returnPathClear()) return;
+    } else if (limitPressed()) {
       triggerAlarm("LIMIT SWITCH");
       return;
     }
@@ -435,7 +483,7 @@ void updateMotion() {
 
     if (!jogging) {
       ++deliveredSteps;
-      if (deliveredSteps >= targetSteps) {
+      if (volumeLimited && deliveredSteps >= targetSteps) {
         completeDose();
         return;
       }
@@ -462,16 +510,11 @@ void updateMotion() {
 
 void checkWatchdog() {
   if (state == JOGGING) {
-    if (millis() - lastJogKeepMs >= JOG_TIMEOUT_MS) finishJog(true);
+    if (millis() - lastJogKeepMs >= JOG_TIMEOUT_MS) finishJog(F("JOG TIMEOUT"));
     return;
   }
 
-  bool active =
-    state == RUNNING ||
-    state == PAUSING ||
-    state == PAUSED;
-
-  if (!active) {
+  if (!runActive()) {
     return;
   }
 
@@ -519,7 +562,8 @@ void printStatus() {
     direction == FORWARD ? F("FORWARD") : F("BACKWARD")
   );
 
-  if (targetSteps > 0) {
+  Serial.println(F("BACKWARD STOP: HOME"));
+  if (targetSteps > 0 || returnRun) {
     Serial.print(F("RUN DIRECTION: "));
     Serial.println(runDirection == FORWARD ? F("FORWARD") : F("BACKWARD"));
   }
@@ -623,7 +667,7 @@ void processCommand(char* command) {
     } else if (argument && strcmp(argument, "KEEP") == 0) {
       keepJog();
     } else if (argument && strcmp(argument, "STOP") == 0) {
-      finishJog(false);
+      finishJog(F("JOG STOPPED"));
     } else {
       Serial.println(F("ERROR: INVALID JOG COMMAND"));
     }
@@ -730,6 +774,7 @@ void processCommand(char* command) {
 
     deliveredSteps = 0;
     targetSteps = 0;
+    returnRun = false;
 
     Serial.println(F("SYRINGE UPDATED"));
   }
@@ -857,14 +902,14 @@ void setup() {
   lastContactMs = millis();
   lastUpdateUs = micros();
 
-  Serial.println(F("SYRINGE PUMP V3.6 READY"));
+  Serial.println(F("SYRINGE PUMP V3.7 READY"));
   Serial.println(
     F("DIRECTION: FORWARD / BACKWARD")
   );
   Serial.println(F("WATCHDOG: 15 SECONDS"));
 
-  if (limitPressed()) {
-    triggerAlarm("LIMIT SWITCH");
+  if (bothLimitsPressed()) {
+    triggerAlarm("BOTH LIMIT SWITCHES ACTIVE");
   }
 }
 
@@ -873,13 +918,20 @@ void setup() {
 // =====================================================
 
 void loop() {
-  // Both endstops stop either direction.
-  if (state != ALARM && limitPressed()) {
-    triggerAlarm("LIMIT SWITCH");
+  if (state == JOGGING) {
+    jogPathClear(jogDirection);
+  } else if (runActive() && returnRun) {
+    returnPathClear();
+  } else if (state != ALARM) {
+    if (bothLimitsPressed()) {
+      triggerAlarm("BOTH LIMIT SWITCHES ACTIVE");
+    } else if (runActive() && limitPressed()) {
+      triggerAlarm("LIMIT SWITCH");
+    }
   }
 
   checkWatchdog();
-  const bool active = state == RUNNING || state == PAUSING || state == PAUSED;
+  const bool active = runActive();
   updateForceSensor(active);
   const bool forwardJog = state == JOGGING && jogMotorEnabled && jogDirection == FORWARD;
   if ((active && runDirection == FORWARD) || forwardJog) {
