@@ -7,7 +7,7 @@
 #include "ForceSensor.h"
 
 // =====================================================
-// SYRINGE PUMP V4.1
+// SYRINGE PUMP V4.2
 // Arduino Mega 2560 + RAMPS 1.4 + A4988
 // FORWARD / BACKWARD MOTOR CONTROL
 // Non-medical benchtop prototype
@@ -32,6 +32,9 @@ const float MAX_STEP_HZ = 1000.0f;
 const float MIN_STEP_HZ = 0.01f;
 const float ACCEL = 800.0f;
 const float JOG_STEP_HZ = 400.0f;
+const float COMMISSION_STEP_HZ = STEPS_PER_MM * 0.5f;
+const unsigned long COMMISSION_STEPS = STEPS_PER_MM;
+const unsigned long COMMISSION_DURATION_MS = 3000UL;
 const float REVERSE_CRUISE_HZ = 1.5f * STEPS_PER_MM;
 const float REVERSE_UNREFERENCED_HZ = 1.0f * STEPS_PER_MM;
 const float HOME_APPROACH_HZ = 0.75f * STEPS_PER_MM;
@@ -74,6 +77,8 @@ Direction runDirection = FORWARD;
 bool returnRun = false;
 Direction jogDirection = FORWARD;
 bool jogMotorEnabled = false;
+unsigned long commissionStepsLeft = 0;
+unsigned long commissionStartedMs = 0;
 unsigned long lastJogKeepMs = 0;
 const char* alarmReason = nullptr;
 
@@ -307,6 +312,7 @@ void disableMotor() {
   digitalWrite(EN_PIN, HIGH);
 
   jogMotorEnabled = false;
+  commissionStepsLeft = 0;
   departingHome = false;
   currentHz = 0.0f;
   stepCredit = 0.0f;
@@ -522,19 +528,30 @@ bool jogPathClear(Direction requested) {
   return false;
 }
 
-void prepareJog(Direction requested) {
+bool checkJogForce(Direction requested, bool commissioning) {
+  if (!commissioning) return checkForwardForce(requested);
+  if (const char* fault = forceFault(false)) {
+    if (strcmp(fault, "FORCE OVERLOAD") == 0) triggerAlarm(fault);
+    else Serial.println(F("ERROR: COMMISSIONING REQUIRES FRESH CALIBRATED FORCE DATA"));
+    return false;
+  }
+  return true;
+}
+
+void prepareJog(Direction requested, bool commissioning) {
   if (!motionAvailable() || !jogPathClear(requested) ||
-      !checkForwardTravel(requested, 1) || !checkForwardForce(requested)) return;
+      !checkForwardTravel(requested, 1) || !checkJogForce(requested, commissioning)) return;
 
   jogDirection = requested;
+  commissionStepsLeft = commissioning ? COMMISSION_STEPS : 0;
   lastJogKeepMs = millis();
   state = JOGGING;
   // An acknowledged direction alone does not enable the driver.
   Serial.println(F("JOG READY"));
 }
 
-void keepJog() {
-  if (state != JOGGING) return;
+void keepJog(bool commissioning) {
+  if (state != JOGGING || commissioning != (commissionStepsLeft > 0)) return;
   const unsigned long now = millis();
   if (now - lastJogKeepMs >= JOG_TIMEOUT_MS) {
     timeoutJog();
@@ -543,7 +560,11 @@ void keepJog() {
 
   if (!jogMotorEnabled) {
     if (!jogPathClear(jogDirection) || !checkForwardTravel(jogDirection, 1) ||
-        !checkForwardForce(jogDirection)) return;
+        !checkJogForce(jogDirection, commissioning)) return;
+    if (commissioning) {
+      resetForcePeak();
+      commissionStartedMs = now;
+    }
     enableMotion(jogDirection);
     jogMotorEnabled = true;
     Serial.println(F("JOG STARTED"));
@@ -632,6 +653,7 @@ void updateMotion() {
   float desiredHz = 0.0f;
   if (jogging) {
     desiredHz = jogDirection == BACKWARD ? limitReverseSpeed(REVERSE_CRUISE_HZ) : JOG_STEP_HZ;
+    if (commissionStepsLeft > 0) desiredHz = COMMISSION_STEP_HZ;
   } else if (state == RUNNING) {
     desiredHz = returnRun ? limitReverseSpeed(retractSpeedHz) : rateHz(flowRate);
   }
@@ -699,6 +721,10 @@ void updateMotion() {
     if (departingHome) ++homeDepartureSteps;
     trackTravelStep(jogging ? jogDirection : runDirection);
 
+    if (jogging && commissionStepsLeft > 0 && --commissionStepsLeft == 0) {
+      finishJog(F("JOG COMMISSION COMPLETE"));
+      return;
+    }
     if (!jogging) {
       ++deliveredSteps;
       if (volumeLimited && deliveredSteps >= targetSteps) {
@@ -729,6 +755,10 @@ void updateMotion() {
 void checkWatchdog() {
   if (state == JOGGING) {
     if (millis() - lastJogKeepMs >= JOG_TIMEOUT_MS) timeoutJog();
+    else if (jogMotorEnabled && commissionStepsLeft > 0 &&
+        millis() - commissionStartedMs >= COMMISSION_DURATION_MS) {
+      finishJog(F("JOG COMMISSION COMPLETE"));
+    }
     return;
   }
 
@@ -815,6 +845,7 @@ void printStatus() {
 
   Serial.print(F("JOG SPEED MM S: "));
   Serial.println(JOG_STEP_HZ / STEPS_PER_MM, 2);
+  Serial.println(F("COMMISSION JOG: YES"));
   Serial.print(F("RETRACT SPEED MM S: "));
   Serial.println(retractSpeedHz / STEPS_PER_MM, 6);
   Serial.print(F("RETRACT MAX MM S: "));
@@ -888,11 +919,15 @@ void processCommand(char* command) {
 
   else if (strcmp(command, "JOG") == 0) {
     if (argument && strcmp(argument, "FORWARD") == 0) {
-      prepareJog(FORWARD);
+      prepareJog(FORWARD, false);
     } else if (argument && strcmp(argument, "BACKWARD") == 0) {
-      prepareJog(BACKWARD);
+      prepareJog(BACKWARD, false);
+    } else if (argument && strcmp(argument, "COMMISSION") == 0) {
+      prepareJog(FORWARD, true);
+    } else if (argument && strcmp(argument, "COMMISSION KEEP") == 0) {
+      keepJog(true);
     } else if (argument && strcmp(argument, "KEEP") == 0) {
-      keepJog();
+      keepJog(false);
     } else if (argument && strcmp(argument, "STOP") == 0) {
       finishJog(F("JOG STOPPED"));
     } else {
@@ -1150,7 +1185,7 @@ void setup() {
   lastContactMs = millis();
   lastUpdateUs = micros();
 
-  Serial.println(F("SYRINGE PUMP V4.1 READY"));
+  Serial.println(F("SYRINGE PUMP V4.2 READY"));
   Serial.println(
     F("DIRECTION: FORWARD / BACKWARD")
   );
@@ -1178,10 +1213,11 @@ void loop() {
 
   checkWatchdog();
   const bool active = runActive();
-  updateForceSensor(active);
+  const bool commissioning = state == JOGGING && jogMotorEnabled && commissionStepsLeft > 0;
+  updateForceSensor(active || commissioning);
   const bool forwardJog = state == JOGGING && jogMotorEnabled && jogDirection == FORWARD;
   if ((active && runDirection == FORWARD) || forwardJog) {
-    if (const char* fault = forceFault()) {
+    if (const char* fault = forceFault(!commissioning)) {
       triggerAlarm(fault);
     }
   }

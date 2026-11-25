@@ -197,9 +197,9 @@ bool forceLimitConfigured() {
   return limitN > 0.0f;
 }
 
-const char* forceFault() {
-  if (!sampleUsable()) return "FORCE SENSOR FAULT";
-  if (forceN >= limitN) return "FORCE OVERLOAD";
+const char* forceFault(bool requireLimit) {
+  if (!sampleUsable() || calibration.countsPerNewton == 0.0f) return "FORCE SENSOR FAULT";
+  if ((requireLimit || forceLimitConfigured()) && forceN >= limitN) return "FORCE OVERLOAD";
   return nullptr;
 }
 
