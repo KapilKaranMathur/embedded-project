@@ -658,6 +658,22 @@
           </div>
         </div>
 
+        <details class="force-setup" id="volumeCalibrationPanel" hidden>
+          <summary>Calibrate delivered volume</summary>
+          <p class="helper">Run three water tests with the selected syringe, then enter the commanded volume and average collected volume. Calibration is saved separately for 20 mL and 50 mL.</p>
+          <div class="force-fields">
+            <label>Commanded test volume (mL)
+              <input id="calibrationCommanded" type="number" min="0.01" step="0.001">
+            </label>
+            <label>Average collected volume (mL)
+              <input id="calibrationMeasured" type="number" min="0.01" step="0.001">
+            </label>
+          </div>
+          <button type="button" class="btn" id="saveVolumeCalibration" disabled>Save volume calibration</button>
+          <button type="button" class="btn" id="clearVolumeCalibration" disabled>Use provisional dimensions</button>
+          <p class="helper" id="volumeCalibrationHelp"></p>
+        </details>
+
         <div class="divider"></div>
 
         <div class="duration">
@@ -915,6 +931,8 @@
     let jogSpeed = null;
     let keyboardJog = null;
     let commissionAvailable = false;
+    let volumeCalibrationAvailable = false;
+    let volumeCalibrated = false;
     let supportsHomeReturn = false;
     let retractMaxSpeed = null;
     let maxCaptureReady = false;
@@ -1303,6 +1321,9 @@
       const travelConfigAllowed = connected && freshStatus && idle && !controlsBusy;
       $("recordMax").disabled = !travelConfigAllowed || !maxCaptureReady;
       $("clearMax").disabled = !travelConfigAllowed || !maxTravelRecorded;
+      $("volumeCalibrationPanel").hidden = !volumeCalibrationAvailable;
+      $("saveVolumeCalibration").disabled = !travelConfigAllowed || direction !== "FORWARD";
+      $("clearVolumeCalibration").disabled = !travelConfigAllowed || !volumeCalibrated;
 
       $("startBtn").textContent =
         busy
@@ -1564,6 +1585,19 @@
       );
       const reportedSyringe = readNumber(fields, "SYRINGE");
       showReading("actualSyringe", reportedSyringe, " mL");
+      volumeCalibrationAvailable = ["YES", "NO"].includes(fields.get("VOLUME CALIBRATED"));
+      volumeCalibrated = fields.get("VOLUME CALIBRATED") === "YES";
+      const volumeStepsPerML = readNumber(fields, "STEPS PER ML");
+      if (!volumeCalibrationAvailable) {
+        $("volumeCalibrationHelp").textContent = "";
+      } else if (volumeCalibrated) {
+        const detail = volumeStepsPerML === null ? "" : ` · ${volumeStepsPerML} steps/mL`;
+        $("volumeCalibrationHelp").textContent =
+          `Saved calibration active for ${reportedSyringe ?? syringe} mL${detail}.`;
+      } else {
+        $("volumeCalibrationHelp").textContent =
+          `Using provisional dimensions for ${reportedSyringe ?? syringe} mL.`;
+      }
       const reportRetractSpeed = reportedDirection === "BACKWARD" && reportedRetractSpeed !== null;
       $("actualRateLabel").textContent = reportRetractSpeed ? "Configured return speed" : "Configured flow rate";
       showReading("actualRate",
@@ -2439,6 +2473,35 @@
       );
     }
 
+    async function saveVolumeCalibration() {
+      const commanded = numericValue("calibrationCommanded");
+      const measured = numericValue("calibrationMeasured");
+      const precise = value => value !== null &&
+        Math.abs(value - Number(value.toFixed(3))) <= 1e-9;
+      if (!precise(commanded) || !precise(measured) ||
+          commanded < 0.01 || commanded > syringe ||
+          measured < 0.01 || measured > syringe * 1.5 ||
+          commanded / measured < 0.5 || commanded / measured > 2) {
+        notice(
+          `Enter valid commanded and measured volumes for the ${syringe} mL syringe, using up to 3 decimals.`,
+          true
+        );
+        return;
+      }
+
+      await runCommands(
+        [[`VOLUME CAL ${commanded.toFixed(3)} ${measured.toFixed(3)}`, "VOLUME CALIBRATED"]],
+        `Saved ${syringe} mL volume calibration.`
+      );
+    }
+
+    async function clearVolumeCalibration() {
+      await runCommands(
+        [["VOLUME CLEAR", "VOLUME CALIBRATION CLEARED"]],
+        `Cleared ${syringe} mL volume calibration.`
+      );
+    }
+
     // ==========================================
     // STOP MOTOR
     // ==========================================
@@ -2546,6 +2609,8 @@
       "click",
       applyVolume
     );
+    $("saveVolumeCalibration").addEventListener("click", saveVolumeCalibration);
+    $("clearVolumeCalibration").addEventListener("click", clearVolumeCalibration);
 
     $("startBtn").addEventListener(
       "click",
