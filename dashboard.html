@@ -1223,8 +1223,14 @@
       const controlsBusy = busy || keyboardJog !== null;
       const forceConfigAllowed = connected && freshStatus && idle &&
         !controlsBusy && forceSettingsAvailable && forceSampleUsable;
-      const forceReady = direction === "BACKWARD" || !forceSettingsAvailable ||
-        forwardForceReady();
+      const forwardReady = forwardForceReady();
+      const forceReady = direction === "BACKWARD" || !forceSettingsAvailable || forwardReady;
+      let forwardBlock = "";
+      if (forceSettingsAvailable && !forwardReady) {
+        if (!forceCalibrated) forwardBlock = "Calibrate the load cell to enable forward motion.";
+        else if (forceCutoff === null) forwardBlock = "Set a validated force cutoff to enable forward motion.";
+        else forwardBlock = "Forward motion needs a fresh force reading.";
+      }
       const homeReturn = returningHome();
       const retract = usingRetractSpeed();
       $("volumeField").hidden = homeReturn;
@@ -1233,7 +1239,7 @@
       $("retractSpeedHint").textContent = retract
         ? `Up to ${retractMaxSpeed} mm/s. The Arduino slows near HOME or when position is unknown.`
         : "";
-      $("startHelp").textContent = retract
+      $("startHelp").textContent = !forceReady ? forwardBlock : retract
         ? "Backward runs at the selected return speed until the HOME switch is pressed."
         : homeReturn
         ? "Backward runs at the selected rate until the HOME switch is pressed."
@@ -1251,8 +1257,8 @@
       } else {
         const backwardSpeed = retractMaxSpeed ?? jogSpeed;
         $("jogHelp").textContent = `Hold ← to jog backward up to ${backwardSpeed} mm/s or → to jog forward up to ${jogSpeed} mm/s. Release to stop.`;
-        if (!forwardForceReady()) {
-          $("jogHelp").textContent += " Forward jog requires force calibration and a cutoff.";
+        if (!forwardReady) {
+          $("jogHelp").textContent += ` ${forwardBlock || "Forward jog requires force calibration and a cutoff."}`;
         }
       }
 
