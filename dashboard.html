@@ -1,0 +1,1952 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Syringe Pump · Control Centre</title>
+
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #f4f6f7;
+      --card: #ffffff;
+      --ink: #192b32;
+      --muted: #71818a;
+      --line: #e1e7e9;
+      --green: #137a68;
+      --green-dark: #0d6555;
+      --red: #b94444;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: .45;
+    }
+
+    button:focus-visible,
+    input:focus-visible,
+    summary:focus-visible {
+      outline: 3px solid #8ac8ba;
+      outline-offset: 2px;
+    }
+
+    .shell {
+      max-width: 1060px;
+      margin: 0 auto;
+      padding: 34px 24px 60px;
+    }
+
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+    }
+
+    .mark {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 13px;
+      background: #d9ece6;
+      color: var(--green);
+      font-size: 25px;
+      font-weight: 700;
+    }
+
+    h1 {
+      font-size: 27px;
+      font-weight: 680;
+      letter-spacing: -.7px;
+      margin: 0;
+    }
+
+    .sub {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      background: #e8ecef;
+      color: #62737c;
+      border-radius: 20px;
+      padding: 9px 13px;
+      font-weight: 600;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .chip::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .chip.connected {
+      color: var(--green);
+      background: #dff1eb;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--card);
+      box-shadow: 0 8px 28px rgba(18, 40, 47, .025);
+    }
+
+    .connection {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 16px 20px;
+      margin-bottom: 16px;
+    }
+
+    .connection-main {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .usb-symbol {
+      width: 39px;
+      height: 39px;
+      border-radius: 11px;
+      background: #f0f4f5;
+      display: grid;
+      place-items: center;
+      font-size: 21px;
+    }
+
+    .connection strong {
+      display: block;
+      font-size: 14px;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .btn {
+      border: 1px solid #dbe3e5;
+      background: #f4f7f7;
+      color: #293e46;
+      padding: 11px 16px;
+      border-radius: 10px;
+      font-weight: 650;
+      transition: background .15s;
+    }
+
+    .btn:hover:not(:disabled) {
+      background: #e9eeee;
+    }
+
+    .btn.primary {
+      background: var(--green);
+      color: white;
+      border-color: var(--green);
+    }
+
+    .btn.primary:hover:not(:disabled) {
+      background: var(--green-dark);
+    }
+
+    .btn.danger {
+      background: #fff1f1;
+      color: var(--red);
+      border-color: #f3cece;
+    }
+
+    .btn.danger:hover:not(:disabled) {
+      background: #fbe1e1;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: .86fr 1.14fr;
+      gap: 16px;
+    }
+
+    .panel {
+      padding: 26px;
+      min-width: 0;
+    }
+
+    h2 {
+      margin: 0 0 5px;
+      font-size: 19px;
+      font-weight: 670;
+      letter-spacing: -.3px;
+    }
+
+    .description {
+      margin: 0 0 28px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .field {
+      margin-bottom: 23px;
+    }
+
+    .field-title {
+      display: block;
+      font-weight: 650;
+      margin-bottom: 10px;
+    }
+
+    .segmented {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      padding: 4px;
+      border-radius: 11px;
+      background: #f0f4f4;
+      gap: 4px;
+    }
+
+    .segment {
+      border: 0;
+      border-radius: 8px;
+      padding: 11px;
+      color: #687b81;
+      background: transparent;
+      font-weight: 650;
+    }
+
+    .segment.active {
+      background: white;
+      color: var(--green);
+      box-shadow: 0 1px 7px rgba(0,0,0,.07);
+    }
+
+    .input-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 9px;
+    }
+
+    .input-holder {
+      display: flex;
+      align-items: center;
+      border-radius: 10px;
+      border: 1px solid #d7e0e2;
+      background: #fbfcfc;
+      min-width: 0;
+    }
+
+    .input-holder:focus-within {
+      border-color: var(--green);
+      box-shadow: 0 0 0 3px #e4f2ee;
+    }
+
+    .input-holder input {
+      width: 100%;
+      min-width: 0;
+      padding: 13px 12px;
+      background: transparent;
+      border: 0;
+      outline: none;
+      font-size: 17px;
+      color: var(--ink);
+      font-weight: 560;
+    }
+
+    .unit {
+      padding-right: 11px;
+      color: #8b999d;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .helper {
+      color: var(--muted);
+      margin-top: 9px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .divider {
+      border-top: 1px solid #edf0f1;
+      margin: 26px 0 22px;
+    }
+
+    .duration {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .duration strong {
+      color: #375057;
+      font-weight: 650;
+    }
+
+    .monitor-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 30px;
+    }
+
+    .state {
+      background: #eff2f3;
+      color: #61727a;
+      border-radius: 7px;
+      padding: 7px 10px;
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: .6px;
+    }
+
+    .state.running {
+      background: #e1f2ec;
+      color: #0f755b;
+    }
+
+    .state.paused {
+      background: #fff2dc;
+      color: #956a1b;
+    }
+
+    .state.fault {
+      background: #fce7e7;
+      color: #b43c3c;
+    }
+
+    .eyebrow {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .delivered {
+      font-size: clamp(37px, 5vw, 51px);
+      font-weight: 660;
+      letter-spacing: -1.9px;
+      margin: 7px 0 24px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .delivered small {
+      font-size: 18px;
+      color: #7f8f95;
+      font-weight: 500;
+      letter-spacing: 0;
+    }
+
+    .progress-head {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 10px;
+    }
+
+    .track {
+      background: #edf1f0;
+      height: 9px;
+      border-radius: 9px;
+      overflow: hidden;
+    }
+
+    .fill {
+      background: var(--green);
+      height: 100%;
+      width: 0%;
+      border-radius: 9px;
+      transition: width .35s;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 22px 14px;
+      margin: 28px 0;
+    }
+
+    .metric-value {
+      margin-top: 6px;
+      font-size: 18px;
+      font-weight: 670;
+      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
+    }
+
+    .buttons {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .buttons .start {
+      grid-column: span 2;
+      padding: 15px;
+      font-size: 15px;
+    }
+
+    .buttons .stop {
+      font-weight: 700;
+    }
+
+    .notice {
+      min-height: 20px;
+      font-size: 12px;
+      margin-top: 16px;
+      color: #5f7879;
+      line-height: 1.5;
+    }
+
+    .notice.error {
+      color: var(--red);
+    }
+
+    .footer-note {
+      margin: 14px 3px 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    details {
+      margin-top: 16px;
+    }
+
+    summary {
+      cursor: pointer;
+      color: #536870;
+      font-size: 13px;
+      font-weight: 650;
+      list-style-position: inside;
+      padding: 18px 20px;
+    }
+
+    pre {
+      max-height: 180px;
+      overflow: auto;
+      padding: 0 20px 18px;
+      margin: 0;
+      font: 12px/1.7 ui-monospace, Menlo, monospace;
+      white-space: pre-wrap;
+      color: #4b626a;
+    }
+
+    @media(max-width: 740px) {
+      .shell { padding: 18px 12px 30px; }
+      .layout { grid-template-columns: 1fr; }
+      .panel { padding: 21px; }
+      h1 { font-size: 23px; }
+      .connection { padding: 14px; }
+      .monitor-head { margin-bottom: 18px; }
+    }
+  </style>
+</head>
+
+<body>
+  <main class="shell">
+
+    <header class="top">
+      <div class="brand">
+        <div class="mark" aria-hidden="true">+</div>
+        <div>
+          <h1>Syringe Pump</h1>
+          <div class="sub">Benchtop control centre</div>
+        </div>
+      </div>
+
+      <span id="connectionChip" class="chip">
+        Disconnected
+      </span>
+    </header>
+
+    <section class="card connection"
+             aria-label="Arduino USB connection">
+      <div class="connection-main">
+        <div class="usb-symbol" aria-hidden="true">⌁</div>
+        <div>
+          <strong>Arduino Mega 2560</strong>
+          <span class="muted">USB serial · 115200 baud</span>
+        </div>
+      </div>
+
+      <button type="button"
+              class="btn primary"
+              id="connectBtn">
+        Connect Arduino
+      </button>
+    </section>
+
+    <div class="layout">
+
+      <!-- SETTINGS -->
+      <section class="card panel"
+               aria-labelledby="settingsTitle">
+
+        <h2 id="settingsTitle">Infusion settings</h2>
+
+        <p class="description">
+          Choose your syringe, flow rate and target volume.
+        </p>
+
+        <div class="field">
+          <label class="field-title">Syringe size</label>
+
+          <div class="segmented"
+               role="group"
+               aria-label="Syringe size">
+
+            <button type="button"
+                    class="segment active"
+                    id="size20"
+                    aria-pressed="true">
+              20 mL
+            </button>
+
+            <button type="button"
+                    class="segment"
+                    id="size50"
+                    aria-pressed="false">
+              50 mL
+            </button>
+          </div>
+        </div>
+
+        <div class="field">
+          <span class="field-title">Motor direction</span>
+
+          <div class="segmented"
+               role="group"
+               aria-label="Motor direction">
+
+            <button type="button"
+                    class="segment active"
+                    id="dirForward"
+                    aria-pressed="true">
+              Forward
+            </button>
+
+            <button type="button"
+                    class="segment"
+                    id="dirBackward"
+                    aria-pressed="false">
+              Backward
+            </button>
+
+          </div>
+
+          <div class="helper" id="directionHelp">
+            Forward: advances the plunger.
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="rate" class="field-title">
+            Flow rate
+          </label>
+
+          <div class="input-row">
+            <div class="input-holder">
+              <input id="rate"
+                     type="text"
+                     inputmode="decimal"
+                     value="5"
+                     autocomplete="off"
+                     spellcheck="false">
+              <span class="unit">mL/min</span>
+            </div>
+
+            <button type="button"
+                    class="btn"
+                    id="applyRate">
+              Apply
+            </button>
+          </div>
+
+          <div class="helper" id="maxRate">
+            Enter any positive rate; the Arduino checks
+            its motor-speed limit.
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="volume" class="field-title" id="volumeCaption">
+            Target volume
+          </label>
+
+          <div class="input-row">
+            <div class="input-holder">
+              <input id="volume"
+                     type="text"
+                     inputmode="decimal"
+                     value="1"
+                     autocomplete="off"
+                     spellcheck="false">
+              <span class="unit">mL</span>
+            </div>
+
+            <button type="button"
+                    class="btn"
+                    id="applyVolume">
+              Apply
+            </button>
+          </div>
+
+          <div class="helper" id="volumeHint">
+            Allowed: 0.01–20 mL for this syringe.
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="duration">
+          <span>Estimated duration</span>
+          <strong id="duration">12 seconds</strong>
+        </div>
+
+        <p class="helper">
+          Start automatically applies all three
+          displayed settings, in order.
+        </p>
+      </section>
+
+      <!-- MONITORING -->
+      <section class="card panel"
+               aria-labelledby="monitorTitle">
+
+        <div class="monitor-head">
+          <h2 id="monitorTitle">Live monitoring</h2>
+          <span class="state" id="state">
+            DISCONNECTED
+          </span>
+        </div>
+
+        <div class="eyebrow">
+          Arduino direction:
+          <strong id="actualDirection">—</strong>
+        </div>
+
+        <div class="eyebrow" id="deliveredCaption">
+          Estimated delivered volume
+        </div>
+
+        <div class="delivered">
+          <span id="delivered">0.0000</span>
+          <small>mL</small>
+        </div>
+
+        <div class="progress-head">
+          <span>Dose progress</span>
+          <strong id="percent">0.0%</strong>
+        </div>
+
+        <div class="track">
+          <div class="fill" id="progress"></div>
+        </div>
+
+        <div class="metrics">
+
+          <div>
+            <div class="eyebrow">Configured rate</div>
+            <div class="metric-value" id="actualRate">—</div>
+          </div>
+
+          <div>
+            <div class="eyebrow">Target volume</div>
+            <div class="metric-value" id="actualVolume">—</div>
+          </div>
+
+          <div>
+            <div class="eyebrow">Motor speed</div>
+            <div class="metric-value" id="rpm">0 RPM</div>
+          </div>
+
+          <div>
+            <div class="eyebrow">Motor steps</div>
+            <div class="metric-value" id="steps">0 / 0</div>
+          </div>
+
+        </div>
+
+        <div class="buttons">
+
+          <button type="button"
+                  class="btn primary start"
+                  id="startBtn"
+                  disabled>
+            Start infusion
+          </button>
+
+          <button type="button"
+                  class="btn"
+                  id="pauseBtn"
+                  disabled>
+            Pause
+          </button>
+
+          <button type="button"
+                  class="btn danger stop"
+                  id="stopBtn"
+                  disabled>
+            Stop motor
+          </button>
+
+        </div>
+
+        <div id="notice"
+             class="notice"
+             role="status"
+             aria-live="polite">
+          Connect the Arduino to begin.
+        </div>
+
+      </section>
+    </div>
+
+    <details class="card">
+      <summary>Activity log</summary>
+      <pre id="log" aria-live="off">No events yet.</pre>
+    </details>
+
+    <p class="footer-note">
+      Bench testing only. Volume is estimated from commanded
+      steps, not measured liquid. Software Stop is not an
+      emergency stop.
+    </p>
+
+  </main>
+
+  <script>
+    "use strict";
+
+    const $ = (id) => document.getElementById(id);
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+
+    let port = null;
+    let reader = null;
+    let writer = null;
+    let readingTask = null;
+
+    let connected = false;
+    let closing = false;
+    let busy = false;
+
+    let syringe = 20;
+    let direction = "FORWARD";
+    let pumpState = "DISCONNECTED";
+
+    let rx = "";
+    let timer = null;
+    let writeQueue = Promise.resolve();
+    let pendingAck = null;
+    let operationId = 0;
+    let eventCount = 0;
+    let connectionEpoch = 0;
+
+    // ==========================================
+    // LOG AND NOTIFICATIONS
+    // ==========================================
+
+    function log(message) {
+      const stamp = new Date().toLocaleTimeString();
+
+      if (eventCount === 0) {
+        $("log").textContent = "";
+      }
+
+      $("log").textContent +=
+        `${stamp}  ${message}\n`;
+
+      eventCount++;
+
+      const lines = $("log").textContent.split("\n");
+
+      if (lines.length > 101) {
+        $("log").textContent =
+          lines.slice(-101).join("\n");
+      }
+    }
+
+    function notice(text, isError = false) {
+      $("notice").textContent = text;
+      $("notice").classList.toggle(
+        "error",
+        isError
+      );
+    }
+
+    // ==========================================
+    // VALIDATE USER INPUT
+    // ==========================================
+
+    function numericValue(id) {
+      const value = $(id).value.trim();
+
+      if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value)) {
+        return null;
+      }
+
+      const number = Number(value);
+
+      return Number.isFinite(number)
+        ? number
+        : null;
+    }
+
+    function settings() {
+      const rate = numericValue("rate");
+      const volume = numericValue("volume");
+
+      if (
+        rate === null ||
+        rate < 0.000001 ||
+        rate > 999999
+      ) {
+        throw new Error(
+          "Enter a positive flow rate up to 999999 " +
+          "mL/min. The Arduino applies its own " +
+          "motor-speed limit."
+        );
+      }
+
+      if (
+        volume === null ||
+        volume < 0.01 ||
+        volume > syringe
+      ) {
+        throw new Error(
+          `Target volume must be between 0.01 ` +
+          `and ${syringe} mL.`
+        );
+      }
+
+      if (
+        Math.abs(volume - Number(volume.toFixed(3))) > 1e-9
+      ) {
+        throw new Error(
+          "Use no more than 3 decimal places for volume."
+        );
+      }
+
+      if (
+        Math.abs(rate - Number(rate.toFixed(6))) > 1e-10
+      ) {
+        throw new Error(
+          "Use no more than 6 decimal places for flow rate."
+        );
+      }
+
+      return {
+        rate,
+        volume,
+        syringe
+      };
+    }
+
+    // ==========================================
+    // DISPLAY CALCULATED DURATION
+    // ==========================================
+
+    function updateDuration() {
+      const rate = numericValue("rate");
+      const volume = numericValue("volume");
+
+      if (!(rate > 0) || !(volume > 0)) {
+        $("duration").textContent = "—";
+        return;
+      }
+
+      const seconds = (volume / rate) * 60;
+
+      $("duration").textContent =
+        seconds < 60
+          ? `${seconds.toFixed(1)} seconds`
+          : `${(seconds / 60).toFixed(2)} minutes`;
+    }
+
+    // ==========================================
+    // SYRINGE SELECTION
+    // ==========================================
+
+    function selectSyringe(size) {
+      if (
+        busy ||
+        (
+          connected &&
+          !["IDLE", "COMPLETE"].includes(pumpState)
+        )
+      ) {
+        return;
+      }
+
+      syringe = size;
+
+      for (const candidate of [20, 50]) {
+        const button = $("size" + candidate);
+
+        button.classList.toggle(
+          "active",
+          size === candidate
+        );
+
+        button.setAttribute(
+          "aria-pressed",
+          String(size === candidate)
+        );
+      }
+
+      $("volumeHint").textContent =
+        `Allowed: 0.01–${size} mL for this syringe.`;
+
+      $("maxRate").textContent =
+        "Motor-speed limit will be checked by the Arduino.";
+
+      updateDuration();
+
+      if (connected) {
+        void runCommands(
+          [[`SYRINGE ${size}`, "SYRINGE UPDATED"]],
+          `Syringe set to ${size} mL.`
+        );
+      }
+    }
+
+    // ==========================================
+    // ENABLE AND DISABLE BUTTONS
+    // ==========================================
+
+    function selectDirection(next) {
+      const idle =
+        ["IDLE", "COMPLETE"].includes(pumpState);
+
+      if (
+        busy ||
+        (connected && !idle)
+      ) {
+        return;
+      }
+
+      direction = next;
+
+      for (const [name, id] of [
+        ["FORWARD", "dirForward"],
+        ["BACKWARD", "dirBackward"]
+      ]) {
+        const selected = direction === name;
+
+        $(id).classList.toggle(
+          "active",
+          selected
+        );
+
+        $(id).setAttribute(
+          "aria-pressed",
+          String(selected)
+        );
+      }
+
+      $("directionHelp").textContent =
+        next === "FORWARD"
+          ? "Forward: advances the plunger."
+          : "Backward: retracts the plunger.";
+
+      $("deliveredCaption").textContent =
+        next === "FORWARD"
+          ? "Estimated delivered volume"
+          : "Estimated reverse travel (mL equivalent)";
+
+      $("volumeCaption").textContent =
+        next === "FORWARD"
+          ? "Target volume"
+          : "Reverse travel (mL equivalent)";
+
+      updateControls();
+    }
+
+    function updateControls() {
+      const idle =
+        ["IDLE", "COMPLETE"].includes(pumpState);
+
+      const running = pumpState === "RUNNING";
+      const paused = pumpState === "PAUSED";
+
+      $("connectBtn").textContent =
+        connected
+          ? "Disconnect"
+          : "Connect Arduino";
+
+      $("connectBtn").disabled = busy;
+
+      $("dirForward").disabled =
+        busy || (connected && !idle);
+
+      $("dirBackward").disabled =
+        busy || (connected && !idle);
+
+      $("startBtn").disabled =
+        !connected || !idle || busy;
+
+      $("startBtn").textContent =
+        busy
+          ? "Applying settings..."
+          : (
+              direction === "BACKWARD"
+                ? "Start retraction"
+                : "Start infusion"
+            );
+
+      $("pauseBtn").disabled =
+        !connected ||
+        busy ||
+        !(running || paused);
+
+      $("pauseBtn").textContent =
+        paused ? "Resume" : "Pause";
+
+      // STOP remains available during a command sequence.
+      $("stopBtn").disabled = !connected;
+
+      $("rate").disabled =
+        busy || pumpState === "FAULT";
+
+      $("volume").disabled =
+        busy || (connected && !idle);
+
+      $("applyRate").disabled =
+        !connected ||
+        busy ||
+        pumpState === "FAULT";
+
+      $("applyVolume").disabled =
+        !connected ||
+        busy ||
+        !idle;
+
+      for (const size of [20, 50]) {
+        $("size" + size).disabled =
+          busy || (connected && !idle);
+      }
+
+      const chip = $("connectionChip");
+
+      chip.textContent =
+        connected
+          ? "Connected"
+          : "Disconnected";
+
+      chip.className =
+        "chip" + (connected ? " connected" : "");
+
+      $("state").textContent = pumpState;
+
+      $("state").className =
+        "state" +
+        (
+          running ? " running" :
+          ["PAUSING", "PAUSED"].includes(pumpState)
+            ? " paused" :
+          ["FAULT", "ALARM"].includes(pumpState)
+            ? " fault" :
+          ""
+        );
+    }
+
+    // ==========================================
+    // CANCEL A PENDING OPERATION
+    // ==========================================
+
+    function cancelOperation(reason = "Cancelled") {
+      operationId++;
+      busy = false;
+
+      if (pendingAck) {
+        const waiting = pendingAck;
+
+        pendingAck = null;
+        clearTimeout(waiting.timeout);
+
+        waiting.reject(new Error(reason));
+      }
+
+      updateControls();
+    }
+
+    // ==========================================
+    // SERIAL WRITE
+    // ==========================================
+
+    function sendLine(command) {
+      const epoch = connectionEpoch;
+
+      const next = writeQueue
+        .catch(() => {})
+        .then(async () => {
+          if (
+            epoch !== connectionEpoch ||
+            !connected ||
+            !writer
+          ) {
+            throw new Error(
+              "Arduino is not connected."
+            );
+          }
+
+          await writer.write(
+            encoder.encode(command + "\n")
+          );
+        });
+
+      writeQueue = next;
+
+      return next;
+    }
+
+    // ==========================================
+    // SEND COMMAND AND WAIT FOR REPLY
+    // ==========================================
+
+    function expectReply(
+      command,
+      expected,
+      timeoutMs = 3000
+    ) {
+      if (pendingAck) {
+        return Promise.reject(
+          new Error(
+            "Another command is still pending."
+          )
+        );
+      }
+
+      return new Promise((resolve, reject) => {
+        const waiting = {
+          expected,
+          resolve,
+          reject,
+
+          timeout: setTimeout(() => {
+            if (pendingAck === waiting) {
+              pendingAck = null;
+            }
+
+            reject(
+              new Error(
+                `No acknowledgement for ${command}.`
+              )
+            );
+          }, timeoutMs)
+        };
+
+        pendingAck = waiting;
+
+        log(`→ ${command}`);
+
+        sendLine(command).catch((error) => {
+          if (pendingAck === waiting) {
+            pendingAck = null;
+            clearTimeout(waiting.timeout);
+            reject(error);
+          }
+        });
+      });
+    }
+
+    // ==========================================
+    // PROCESS ARDUINO RESPONSES
+    // ==========================================
+
+    function handleLine(line) {
+      if (!line || line.startsWith("---")) {
+        return;
+      }
+
+      if (line.startsWith("DIRECTION:")) {
+        $("actualDirection").textContent =
+          line.split(":")[1].trim();
+      }
+
+      if (line.startsWith("STATE:")) {
+        pumpState = line.slice(6).trim();
+        updateControls();
+      }
+
+      else if (
+        line.startsWith("ESTIMATED DELIVERED:")
+      ) {
+        const value = parseFloat(
+          line.split(":")[1]
+        );
+
+        if (Number.isFinite(value)) {
+          $("delivered").textContent =
+            value.toFixed(4);
+        }
+      }
+
+      else if (line.startsWith("FLOW RATE:")) {
+        const value = line.split(":")[1].trim();
+        $("actualRate").textContent =
+          value.includes("mL/min") ? value : `${value} mL/min`;
+      }
+
+      else if (line.startsWith("TARGET VOLUME:")) {
+        const value = line.split(":")[1].trim();
+        $("actualVolume").textContent =
+          value.includes("mL") ? value : `${value} mL`;
+      }
+
+      else if (line.startsWith("CURRENT RPM:")) {
+        $("rpm").textContent =
+          `${line.split(":")[1].trim()} RPM`;
+      }
+
+      else if (line.startsWith("STEPS:")) {
+        const value =
+          line.split(":")[1].trim();
+
+        $("steps").textContent = value;
+
+        const [done, total] =
+          value.split("/").map(Number);
+
+        if (
+          Number.isFinite(done) &&
+          Number.isFinite(total)
+        ) {
+          const pct =
+            total > 0
+              ? Math.min(
+                  100,
+                  Math.max(0, done / total * 100)
+                )
+              : 0;
+
+          $("percent").textContent =
+            `${pct.toFixed(1)}%`;
+
+          $("progress").style.width =
+            `${pct}%`;
+        }
+      }
+
+      else if ((line.startsWith("MAX FLOW:") ||
+        line.startsWith("MAX FLOW FOR SYRINGE:"))) {
+        $("maxRate").textContent =
+          "Current firmware limit: " +
+          line.split(":")[1].trim() +
+          " mL/min.";
+      }
+
+      // --------------------------------------
+      // ERROR / ALARM
+      // --------------------------------------
+
+      if (
+        line.startsWith("ALARM:") ||
+        line.startsWith("ERROR:") ||
+        line === "UNKNOWN COMMAND"
+      ) {
+        log(`! ${line}`);
+        notice(line, true);
+
+        if (line.startsWith("ALARM:")) {
+          pumpState = "FAULT";
+        }
+
+        if (pendingAck) {
+          const waiting = pendingAck;
+
+          pendingAck = null;
+          clearTimeout(waiting.timeout);
+
+          waiting.reject(new Error(line));
+        }
+
+        updateControls();
+        return;
+      }
+
+      // --------------------------------------
+      // MOTOR EVENTS
+      // --------------------------------------
+
+      const states = {
+        "PUMP STARTED": "RUNNING",
+
+        "PUMP STOPPED":
+          pumpState === "FAULT"
+            ? "FAULT"
+            : "IDLE",
+
+        "PUMP PAUSED": "PAUSED",
+        "PUMP RESUMED": "RUNNING",
+        "TARGET STEPS COMPLETE": "COMPLETE",
+        "DECELERATING TO PAUSE": "PAUSING"
+      };
+
+      if (Object.prototype.hasOwnProperty.call(
+        states,
+        line
+      )) {
+        pumpState = states[line];
+
+        log(`✓ ${line}`);
+        updateControls();
+      }
+
+      const confirmations = [
+        "SYRINGE UPDATED",
+        "FLOW RATE UPDATED",
+        "TARGET VOLUME UPDATED",
+        "PUMP ARMED"
+      ];
+
+      if (confirmations.includes(line)) {
+        log(`✓ ${line}`);
+      }
+
+      // Finish waiting command only on exact match.
+      if (
+        pendingAck &&
+        line === pendingAck.expected
+      ) {
+        const waiting = pendingAck;
+
+        pendingAck = null;
+        clearTimeout(waiting.timeout);
+
+        waiting.resolve();
+      }
+    }
+
+    // ==========================================
+    // SERIAL READ LOOP
+    // ==========================================
+
+    async function readLoop() {
+      const currentReader = reader;
+
+      try {
+        while (connected) {
+          const { value, done } =
+            await currentReader.read();
+
+          if (done) {
+            break;
+          }
+
+          rx += decoder.decode(
+            value,
+            { stream: true }
+          );
+
+          if (rx.length > 16000) {
+            rx = rx.slice(-4000);
+          }
+
+          let index;
+
+          while (
+            (index = rx.indexOf("\n")) >= 0
+          ) {
+            const line =
+              rx.slice(0, index).trim();
+
+            rx = rx.slice(index + 1);
+
+            handleLine(line);
+          }
+        }
+      }
+
+      catch (error) {
+        if (!closing) {
+          log(
+            "! Serial connection lost: " +
+            error.message
+          );
+        }
+      }
+
+      finally {
+        try {
+          currentReader.releaseLock();
+        } catch (_) {}
+
+        if (reader === currentReader) {
+          reader = null;
+        }
+
+        if (!closing) {
+          connected = false;
+          connectionEpoch++;
+
+          clearInterval(timer);
+
+          cancelOperation(
+            "Serial connection lost"
+          );
+
+          pumpState = "DISCONNECTED";
+          updateControls();
+
+          notice(
+            "USB connection lost. The Arduino " +
+            "watchdog should stop the pump if " +
+            "that firmware is installed.",
+            true
+          );
+
+          try {
+            writer?.releaseLock();
+          } catch (_) {}
+
+          writer = null;
+
+          try {
+            await port?.close();
+          } catch (_) {}
+
+          port = null;
+        }
+      }
+    }
+
+    // ==========================================
+    // CONNECT ARDUINO
+    // ==========================================
+
+    async function connect() {
+      if (!("serial" in navigator)) {
+        notice(
+          "Use desktop Google Chrome at " +
+          "http://localhost:8000/dashboard.html " +
+          "because Web Serial is unavailable here.",
+          true
+        );
+        return;
+      }
+
+      try {
+        // Browser must request USB access
+        // directly after the user's button click.
+        port =
+          await navigator.serial.requestPort();
+
+        await port.open({
+          baudRate: 115200
+        });
+
+        reader =
+          port.readable.getReader();
+
+        writer =
+          port.writable.getWriter();
+
+        connectionEpoch++;
+        connected = true;
+        closing = false;
+
+        pumpState = "CONNECTING";
+        rx = "";
+
+        readingTask = readLoop();
+
+        updateControls();
+
+        notice(
+          "Waiting for Arduino to reset..."
+        );
+
+        log("USB opened at 115200 baud");
+
+        // Arduino Mega commonly resets on
+        // opening the serial connection.
+        await new Promise(
+          (resolve) => setTimeout(resolve, 2500)
+        );
+
+        if (!connected) {
+          return;
+        }
+
+        await sendLine("STATUS");
+
+        // STATUS also refreshes the watchdog
+        // in the latest Arduino IDE sketch.
+        timer = setInterval(() => {
+          if (connected && !busy) {
+            sendLine("STATUS").catch(
+              (error) => {
+                notice(error.message, true);
+              }
+            );
+          }
+        }, 4000);
+
+        notice(
+          "Connected. Choose settings, " +
+          "then press Start."
+        );
+      }
+
+      catch (error) {
+        if (error.name !== "NotFoundError") {
+          notice(
+            "Connection error: " +
+            error.message,
+            true
+          );
+        }
+
+        await disconnect(true);
+      }
+    }
+
+    // ==========================================
+    // DISCONNECT ARDUINO
+    // ==========================================
+
+    async function disconnect(force = false) {
+      if (
+        !force &&
+        ["RUNNING", "PAUSING", "PAUSED"]
+          .includes(pumpState)
+      ) {
+        notice(
+          "Stop the motor and confirm IDLE " +
+          "before disconnecting.",
+          true
+        );
+        return;
+      }
+
+      closing = true;
+      connected = false;
+      connectionEpoch++;
+
+      clearInterval(timer);
+      cancelOperation("Disconnected");
+
+      try {
+        await reader?.cancel();
+      } catch (_) {}
+
+      try {
+        await readingTask;
+      } catch (_) {}
+
+      try {
+        writer?.releaseLock();
+      } catch (_) {}
+
+      writer = null;
+
+      try {
+        await port?.close();
+      } catch (_) {}
+
+      port = null;
+      readingTask = null;
+
+      pumpState = "DISCONNECTED";
+
+      updateControls();
+
+      if (!force) {
+        notice("Disconnected.");
+      }
+
+      log("USB closed");
+
+      closing = false;
+    }
+
+    // ==========================================
+    // RUN COMMAND SEQUENCE
+    // ==========================================
+
+    async function runCommands(
+      steps,
+      label,
+      isStart = false
+    ) {
+      if (!connected || busy) {
+        return;
+      }
+
+      const id = ++operationId;
+
+      busy = true;
+      updateControls();
+
+      try {
+        for (const [command, expected] of steps) {
+          if (id !== operationId) {
+            return;
+          }
+
+          await expectReply(
+            command,
+            expected
+          );
+        }
+
+        if (id === operationId) {
+          notice(label);
+        }
+      }
+
+      catch (error) {
+        if (id === operationId) {
+          notice(
+            error.message +
+            (
+              isStart
+                ? " Start cancelled; sending STOP."
+                : ""
+            ),
+            true
+          );
+
+          // A failed START sequence must not
+          // be followed by additional start commands.
+          if (isStart && connected) {
+            try {
+              await sendLine("STOP");
+            } catch (_) {}
+          }
+        }
+      }
+
+      finally {
+        if (id === operationId) {
+          busy = false;
+          updateControls();
+        }
+      }
+    }
+
+    // ==========================================
+    // START INFUSION
+    // ==========================================
+
+    async function startPump() {
+      let values;
+
+      try {
+        values = settings();
+      }
+
+      catch (error) {
+        notice(error.message, true);
+        return;
+      }
+
+      if (
+        pumpState !== "IDLE" &&
+        pumpState !== "COMPLETE"
+      ) {
+        return;
+      }
+
+      // Each command waits for confirmation.
+      // This sketch requires ARM before START.
+      // If ARM is unsupported, START is not sent.
+
+      await runCommands(
+        [
+          [
+            `SYRINGE ${values.syringe}`,
+            "SYRINGE UPDATED"
+          ],
+
+          [
+            `DIRECTION ${direction}`,
+            "DIRECTION UPDATED"
+          ],
+
+          [
+            `RATE ${values.rate.toFixed(6)}`,
+            "FLOW RATE UPDATED"
+          ],
+
+          [
+            `VOLUME ${values.volume.toFixed(3)}`,
+            "TARGET VOLUME UPDATED"
+          ],
+
+          [
+            "START",
+            "PUMP STARTED"
+          ]
+        ],
+
+        "Infusion started.",
+        true
+      );
+    }
+
+    // ==========================================
+    // APPLY FLOW RATE INDEPENDENTLY
+    // ==========================================
+
+    async function applyRate() {
+      const value = numericValue("rate");
+
+      if (
+        !(value > 0) ||
+        value > 999999 ||
+        Math.abs(
+          value - Number(value.toFixed(6))
+        ) > 1e-10
+      ) {
+        notice(
+          "Enter a positive rate with up to " +
+          "6 decimal places.",
+          true
+        );
+        return;
+      }
+
+      await runCommands(
+        [
+          [
+            `RATE ${value.toFixed(6)}`,
+            "FLOW RATE UPDATED"
+          ]
+        ],
+
+        "Flow rate updated."
+      );
+    }
+
+    // ==========================================
+    // APPLY TARGET VOLUME INDEPENDENTLY
+    // ==========================================
+
+    async function applyVolume() {
+      const value = numericValue("volume");
+
+      if (
+        value === null ||
+        value < 0.01 ||
+        value > syringe ||
+        Math.abs(
+          value - Number(value.toFixed(3))
+        ) > 1e-9
+      ) {
+        notice(
+          `Enter a volume from 0.01 to ` +
+          `${syringe} mL (up to 3 decimals).`,
+          true
+        );
+        return;
+      }
+
+      await runCommands(
+        [
+          [
+            `VOLUME ${value.toFixed(3)}`,
+            "TARGET VOLUME UPDATED"
+          ]
+        ],
+
+        "Target volume updated."
+      );
+    }
+
+    // ==========================================
+    // STOP MOTOR
+    // ==========================================
+
+    async function stopPump() {
+      if (!connected) {
+        return;
+      }
+
+      // Stop cancels any pending START sequence.
+      cancelOperation("Stopped by user");
+
+      notice(
+        "STOP sent. Confirm IDLE on the Arduino."
+      );
+
+      log("→ STOP");
+
+      try {
+        await sendLine("STOP");
+      }
+
+      catch (error) {
+        notice(
+          "Could not send STOP: " +
+          error.message +
+          ". Use the physical cutoff.",
+          true
+        );
+      }
+    }
+
+    // ==========================================
+    // BUTTON EVENTS
+    // ==========================================
+
+    $("connectBtn").addEventListener(
+      "click",
+      () => connected ? disconnect() : connect()
+    );
+
+    $("dirForward").addEventListener(
+      "click",
+      () => selectDirection("FORWARD")
+    );
+
+    $("dirBackward").addEventListener(
+      "click",
+      () => selectDirection("BACKWARD")
+    );
+
+    $("size20").addEventListener(
+      "click",
+      () => selectSyringe(20)
+    );
+
+    $("size50").addEventListener(
+      "click",
+      () => selectSyringe(50)
+    );
+
+    $("rate").addEventListener(
+      "input",
+      updateDuration
+    );
+
+    $("volume").addEventListener(
+      "input",
+      updateDuration
+    );
+
+    $("rate").addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "Enter") {
+          applyRate();
+        }
+      }
+    );
+
+    $("volume").addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "Enter") {
+          applyVolume();
+        }
+      }
+    );
+
+    $("applyRate").addEventListener(
+      "click",
+      applyRate
+    );
+
+    $("applyVolume").addEventListener(
+      "click",
+      applyVolume
+    );
+
+    $("startBtn").addEventListener(
+      "click",
+      startPump
+    );
+
+    $("stopBtn").addEventListener(
+      "click",
+      stopPump
+    );
+
+    $("pauseBtn").addEventListener(
+      "click",
+      async () => {
+        const command =
+          pumpState === "PAUSED"
+            ? "RESUME"
+            : "PAUSE";
+
+        await runCommands(
+          [
+            [
+              command,
+              command === "PAUSE"
+                ? "PUMP PAUSED"
+                : "PUMP RESUMED"
+            ]
+          ],
+
+          command === "PAUSE"
+            ? "Infusion paused."
+            : "Infusion resumed."
+        );
+      }
+    );
+
+    // Browser warning only — cannot guarantee
+    // that closing a tab stops the Arduino.
+    window.addEventListener(
+      "beforeunload",
+      (event) => {
+        if (
+          connected &&
+          ["RUNNING", "PAUSING", "PAUSED"]
+            .includes(pumpState)
+        ) {
+          event.preventDefault();
+          event.returnValue = "";
+        }
+      }
+    );
+
+    // ==========================================
+    // INITIAL DISPLAY
+    // ==========================================
+
+    updateDuration();
+    updateControls();
+  </script>
+
+</body>
+</html>
