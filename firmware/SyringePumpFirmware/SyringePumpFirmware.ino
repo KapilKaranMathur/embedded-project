@@ -7,7 +7,7 @@
 #include "ForceSensor.h"
 
 // =====================================================
-// SYRINGE PUMP V4.0
+// SYRINGE PUMP V4.1
 // Arduino Mega 2560 + RAMPS 1.4 + A4988
 // FORWARD / BACKWARD MOTOR CONTROL
 // Non-medical benchtop prototype
@@ -1150,7 +1150,7 @@ void setup() {
   lastContactMs = millis();
   lastUpdateUs = micros();
 
-  Serial.println(F("SYRINGE PUMP V4.0 READY"));
+  Serial.println(F("SYRINGE PUMP V4.1 READY"));
   Serial.println(
     F("DIRECTION: FORWARD / BACKWARD")
   );

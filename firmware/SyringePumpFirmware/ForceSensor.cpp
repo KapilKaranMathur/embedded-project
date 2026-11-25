@@ -1,8 +1,11 @@
 #include <Arduino.h>
+#include <EEPROM.h>
 #include <HX711.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <util/atomic.h>
+#include <util/crc16.h>
 #include "ForceSensor.h"
 
 namespace {
@@ -13,6 +16,19 @@ constexpr long ADC_MAX = 8388607L;
 constexpr float RATED_KG = 20.0f;
 constexpr float STANDARD_GRAVITY = 9.80665f;
 constexpr unsigned long SAMPLE_TIMEOUT_MS = 1000UL;
+
+struct Calibration {
+  int32_t zeroCounts;
+  float countsPerNewton;
+};
+
+static_assert(sizeof(Calibration) == 8, "Unexpected calibration EEPROM layout");
+// EEPROM bytes 0 through 10 are reserved for the force calibration record.
+constexpr int CALIBRATION_VERSION_ADDR = 0;
+constexpr int CALIBRATION_DATA_ADDR = CALIBRATION_VERSION_ADDR + 1;
+constexpr int CALIBRATION_CRC_ADDR = CALIBRATION_DATA_ADDR + sizeof(Calibration);
+constexpr uint8_t CALIBRATION_VERSION = 1;
+constexpr uint8_t CALIBRATION_UNCOMMITTED = 0;
 
 HX711 sensor;
 volatile uint8_t* dataPort;
@@ -26,8 +42,7 @@ bool transferOk = true;
 bool expired = false;
 unsigned long sampleMs;
 long raw;
-long zeroCounts;
-float countsPerNewton;
+Calibration calibration{};
 float forceN;
 float peakN;
 bool peakRecorded = false;
@@ -40,6 +55,41 @@ bool inRange(long count) {
 bool sampleUsable() {
   return received && !expired && transferOk && inRange(raw) &&
     millis() - sampleMs < SAMPLE_TIMEOUT_MS;
+}
+
+uint16_t calibrationCRC(const Calibration& value) {
+  uint16_t crc = _crc16_update(0xFFFF, CALIBRATION_VERSION);
+  const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+  for (size_t i = 0; i < sizeof(value); ++i) {
+    crc = _crc16_update(crc, bytes[i]);
+  }
+  return crc;
+}
+
+bool readSavedCalibration(Calibration& saved) {
+  if (EEPROM.read(CALIBRATION_VERSION_ADDR) != CALIBRATION_VERSION) return false;
+  uint16_t crc;
+  EEPROM.get(CALIBRATION_DATA_ADDR, saved);
+  EEPROM.get(CALIBRATION_CRC_ADDR, crc);
+  return crc == calibrationCRC(saved) && inRange(saved.zeroCounts) &&
+    isfinite(saved.countsPerNewton) && saved.countsPerNewton != 0.0f;
+}
+
+bool sameCalibration(const Calibration& first, const Calibration& second) {
+  return first.zeroCounts == second.zeroCounts && first.countsPerNewton == second.countsPerNewton;
+}
+
+bool saveCalibration(const Calibration& next) {
+  Calibration saved;
+  if (readSavedCalibration(saved) && sameCalibration(saved, next)) return true;
+
+  // Mark the record incomplete before writing and commit the version byte last.
+  EEPROM.update(CALIBRATION_VERSION_ADDR, CALIBRATION_UNCOMMITTED);
+  if (EEPROM.read(CALIBRATION_VERSION_ADDR) != CALIBRATION_UNCOMMITTED) return false;
+  EEPROM.put(CALIBRATION_DATA_ADDR, next);
+  EEPROM.put(CALIBRATION_CRC_ADDR, calibrationCRC(next));
+  EEPROM.update(CALIBRATION_VERSION_ADDR, CALIBRATION_VERSION);
+  return readSavedCalibration(saved) && sameCalibration(saved, next);
 }
 
 // The library handles setup and readiness. This fixed-length transfer avoids
@@ -80,12 +130,22 @@ float parsePositive(const char* value) {
   return end != value && *end == '\0' && number > 0.0f ? number : 0.0f;
 }
 
-void applyCalibration(long zero, float scale) {
-  zeroCounts = zero;
-  countsPerNewton = scale;
-  forceN = (raw - zeroCounts) / countsPerNewton;
+void applyCalibration(const Calibration& next) {
+  calibration = next;
+  forceN = sampleUsable() && calibration.countsPerNewton != 0.0f
+    ? (raw - calibration.zeroCounts) / calibration.countsPerNewton : 0.0f;
   limitN = 0.0f;
   resetForcePeak();
+}
+
+bool setCalibration(const Calibration& next) {
+  if (!saveCalibration(next)) {
+    applyCalibration({});
+    Serial.println(F("ERROR: COULD NOT SAVE FORCE CALIBRATION"));
+    return false;
+  }
+  applyCalibration(next);
+  return true;
 }
 }
 
@@ -97,6 +157,8 @@ void beginForceSensor() {
   dataMask = digitalPinToBitMask(DOUT_PIN);
   clockMask = digitalPinToBitMask(SCK_PIN);
   sampleMs = millis();
+  Calibration saved;
+  if (readSavedCalibration(saved)) applyCalibration(saved);
 }
 
 void updateForceSensor(bool trackPeak) {
@@ -122,8 +184,8 @@ void updateForceSensor(bool trackPeak) {
   sampleMs = millis();
   received = true;
   expired = false;
-  if (countsPerNewton != 0.0f && inRange(raw)) {
-    forceN = (raw - zeroCounts) / countsPerNewton;
+  if (calibration.countsPerNewton != 0.0f && inRange(raw)) {
+    forceN = (raw - calibration.zeroCounts) / calibration.countsPerNewton;
     if (trackPeak) {
       peakRecorded = true;
       if (forceN > peakN) peakN = forceN;
@@ -171,9 +233,10 @@ void printForceStatus() {
     Serial.println(F("NA"));
   }
 
-  const bool calibrated = countsPerNewton != 0.0f;
+  const bool calibrated = calibration.countsPerNewton != 0.0f;
   Serial.print(F("FORCE CALIBRATED: "));
   Serial.println(calibrated ? F("YES") : F("NO"));
+  Serial.println(F("FORCE CAL STORAGE: EEPROM"));
   Serial.print(F("FORCE LIMIT N: "));
   if (forceLimitConfigured()) Serial.println(limitN, 3);
   else Serial.println(F("NA"));
@@ -219,18 +282,20 @@ void processForceCommand(char* argument, bool canConfigure) {
       Serial.println(F("ERROR: INVALID FORCE CALIBRATION"));
       return;
     }
-    applyCalibration(zero, (loaded - zero) / (kg * STANDARD_GRAVITY));
-    Serial.println(F("FORCE CALIBRATED"));
+    if (setCalibration({static_cast<int32_t>(zero), (loaded - zero) / (kg * STANDARD_GRAVITY)})) {
+      Serial.println(F("FORCE CALIBRATED"));
+    }
   } else if (strcmp(command, "TARE") == 0) {
-    if (countsPerNewton == 0.0f || strtok_r(nullptr, separators, &cursor)) {
+    if (calibration.countsPerNewton == 0.0f || strtok_r(nullptr, separators, &cursor)) {
       Serial.println(F("ERROR: CALIBRATE FORCE BEFORE TARE"));
       return;
     }
-    applyCalibration(raw, countsPerNewton);
-    Serial.println(F("FORCE TARED"));
+    if (setCalibration({static_cast<int32_t>(raw), calibration.countsPerNewton})) {
+      Serial.println(F("FORCE TARED"));
+    }
   } else if (strcmp(command, "LIMIT") == 0) {
     const float limit = parsePositive(strtok_r(nullptr, separators, &cursor));
-    if (countsPerNewton == 0.0f || !(limit >= 0.001f && limit <= RATED_KG * STANDARD_GRAVITY) ||
+    if (calibration.countsPerNewton == 0.0f || !(limit >= 0.001f && limit <= RATED_KG * STANDARD_GRAVITY) ||
         strtok_r(nullptr, separators, &cursor)) {
       Serial.println(F("ERROR: INVALID FORCE LIMIT OR CALIBRATION MISSING"));
       return;
