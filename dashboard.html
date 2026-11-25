@@ -838,6 +838,12 @@
           </div>
         </div>
         <p class="helper" id="forceProtection"></p>
+        <details class="force-setup" id="commissionPanel" hidden>
+          <summary>Measure normal pumping force</summary>
+          <p class="helper">Use water and an open outlet. Keep the motor power switch within reach. Automatic overload stopping requires a cutoff.</p>
+          <p class="helper" id="commissionHelp"></p>
+          <button type="button" class="btn" id="commissionJog" aria-describedby="commissionHelp" disabled>Hold to move forward</button>
+        </details>
         <button type="button" class="btn" id="testAlarmSound">Test alarm sound</button>
         <span class="helper" id="alarmSoundState" role="status"></span>
 
@@ -908,6 +914,7 @@
     const JOG_KEEP_MS = 120;
     let jogSpeed = null;
     let keyboardJog = null;
+    let commissionAvailable = false;
     let supportsHomeReturn = false;
     let retractMaxSpeed = null;
     let maxCaptureReady = false;
@@ -1229,6 +1236,13 @@
       const freshStatus = lastStatusAt !== null;
       const alarm = ["FAULT", "ALARM"].includes(pumpState);
       const controlsBusy = busy || keyboardJog !== null;
+      const commissioning = keyboardJog?.commissioning === true;
+      $("commissionPanel").hidden = !commissionAvailable;
+      $("commissionJog").disabled = !commissioning &&
+        (!connected || lastStatusAt === null || !idle || controlsBusy || !forceCalibrated || !forceSampleUsable);
+      $("commissionHelp").textContent = !forceCalibrated || !forceSampleUsable
+        ? "Requires a calibrated load cell with a fresh reading."
+        : "Hold for up to 1 mm at 0.5 mm/s. Release to stop, then read Run peak compression above.";
       const forceConfigAllowed = connected && freshStatus && idle &&
         !controlsBusy && forceSettingsAvailable && forceSampleUsable;
       const forwardBlock = forwardForceBlock();
@@ -1250,8 +1264,9 @@
         !forceSettingsAvailable || !forwardBlock;
 
       if (keyboardJog) {
-        const label = JOG_KEYS[keyboardJog.key].toLowerCase();
-        $("jogHelp").textContent = `Holding ${label}. Release the arrow key to stop.`;
+        $("jogHelp").textContent = commissioning
+          ? "Measuring forward force. Release the control to stop."
+          : `Holding ${JOG_KEYS[keyboardJog.key].toLowerCase()}. Release the arrow key to stop.`;
       } else if (!connected || !freshStatus) {
         $("jogHelp").textContent = "Connect the Arduino and wait for status to use keyboard jog.";
       } else if (jogSpeed === null) {
@@ -1612,6 +1627,7 @@
       forceSampleUsable = sample.usable;
       forceCutoff = readNumber(fields, "FORCE LIMIT N");
       jogSpeed = readNumber(fields, "JOG SPEED MM S");
+      commissionAvailable = fields.get("COMMISSION JOG") === "YES";
       renderTravel(fields);
       $("forceSetup").hidden = !forceSettingsAvailable;
       showReading("forceNewtons", forceCalibrated && forceSampleUsable
@@ -1745,6 +1761,7 @@
         "JOG HOME REACHED": "IDLE",
         "JOG MAX REACHED": "IDLE",
         "JOG TRAVEL LIMIT": "IDLE",
+        "JOG COMMISSION COMPLETE": "IDLE",
         "HOME REACHED": "COMPLETE",
         "TARGET STEPS COMPLETE": "COMPLETE",
         "DECELERATING TO PAUSE": "PAUSING"
@@ -1756,7 +1773,7 @@
       )) {
         pumpState = states[line];
 
-        const jogEnded = ["JOG STOPPED", "JOG TIMEOUT", "JOG HOME REACHED", "JOG MAX REACHED", "JOG TRAVEL LIMIT"]
+        const jogEnded = ["JOG STOPPED", "JOG TIMEOUT", "JOG HOME REACHED", "JOG MAX REACHED", "JOG TRAVEL LIMIT", "JOG COMMISSION COMPLETE"]
           .includes(line);
         if (jogEnded || line === "PUMP STOPPED") {
           stopKeyboardJog(false);
@@ -1764,6 +1781,7 @@
           if (line === "JOG HOME REACHED") notice("HOME reached. Backward jog stopped.");
           if (line === "JOG MAX REACHED") notice("MAX reached. Forward jog stopped.");
           if (line === "JOG TRAVEL LIMIT") notice("Forward travel limit reached. Jog stopped.");
+          if (line === "JOG COMMISSION COMPLETE") notice("Measurement move stopped. Read Run peak compression.");
           if (jogEnded && line !== "JOG STOPPED" && connected) requestStatus();
         }
         if (line === "PUMP STARTED") {
@@ -2092,7 +2110,7 @@
       }
 
       hold.writePending = true;
-      sendLine("JOG KEEP", () => keyboardJog === hold)
+      sendLine(hold.commissioning ? "JOG COMMISSION KEEP" : "JOG KEEP", () => keyboardJog === hold)
         .catch(error => {
           if (keyboardJog === hold) {
             stopKeyboardJog();
@@ -2128,12 +2146,26 @@
         }
       }
 
-      const hold = { key: event.key, timer: null, confirmed: false, writePending: false };
+      await beginJog({ key: event.key }, `JOG ${requested}`);
+    }
+
+    function startCommissionJog(event) {
+      expireStatus();
+      if (keyboardJog || !commissionAvailable || $("commissionJog").disabled ||
+          document.hidden || !document.hasFocus()) return;
+
+      event.preventDefault();
+      const hold = { commissioning: true, key: event.key, pointerId: event.pointerId };
+      if (hold.pointerId !== undefined) event.currentTarget.setPointerCapture(hold.pointerId);
+      void beginJog(hold, "JOG COMMISSION");
+    }
+
+    async function beginJog(hold, command) {
       keyboardJog = hold;
       updateControls();
       void enableAlarmSound();
       try {
-        await expectReply(`JOG ${requested}`, "JOG READY", 500, () => keyboardJog === hold);
+        await expectReply(command, "JOG READY", 500, () => keyboardJog === hold);
         if (keyboardJog !== hold) return;
         hold.confirmed = true;
         renewKeyboardJog(hold);
@@ -2543,6 +2575,20 @@
     );
 
     window.addEventListener("keydown", startKeyboardJog);
+    $("commissionJog").addEventListener("pointerdown", event => {
+      if (event.button === 0 && event.isPrimary) startCommissionJog(event);
+    });
+    for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+      $("commissionJog").addEventListener(type, event => {
+        if (keyboardJog?.commissioning && keyboardJog.pointerId === event.pointerId) stopKeyboardJog();
+      });
+    }
+    $("commissionJog").addEventListener("keydown", event => {
+      if (event.key === " " && !event.repeat) startCommissionJog(event);
+    });
+    $("commissionJog").addEventListener("blur", () => {
+      if (keyboardJog?.commissioning) stopKeyboardJog();
+    });
     window.addEventListener("keyup", event => {
       if (event.key === keyboardJog?.key) {
         event.preventDefault();
