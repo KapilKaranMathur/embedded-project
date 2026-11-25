@@ -750,6 +750,8 @@
 
         </div>
 
+        <p class="helper" id="jogHelp">Connect the Arduino to use keyboard jog.</p>
+
         <div id="notice"
              class="notice"
              role="status"
@@ -839,6 +841,10 @@
     let lastStatusAt = null;
     const STATUS_POLL_MS = 4000;
     const STATUS_EXPIRY_MS = 12000;
+    const JOG_KEYS = { ArrowRight: "FORWARD", ArrowLeft: "BACKWARD" };
+    const JOG_KEEP_MS = 120;
+    let jogSpeed = null;
+    let keyboardJog = null;
     let forceSettingsAvailable = false;
     let forceCalibrated = false;
     let forceSampleUsable = false;
@@ -1122,13 +1128,31 @@
         ["IDLE", "COMPLETE"].includes(pumpState);
 
       const running = pumpState === "RUNNING";
+      const jogging = pumpState === "JOGGING";
       const paused = pumpState === "PAUSED";
       const freshStatus = lastStatusAt !== null;
       const alarm = ["FAULT", "ALARM"].includes(pumpState);
+      const controlsBusy = busy || keyboardJog !== null;
       const forceConfigAllowed = connected && freshStatus && idle &&
-        !busy && forceSettingsAvailable && forceSampleUsable;
+        !controlsBusy && forceSettingsAvailable && forceSampleUsable;
       const forceReady = direction === "BACKWARD" || !forceSettingsAvailable ||
-        (forceCalibrated && forceCutoff !== null && forceSampleUsable);
+        forwardForceReady();
+
+      if (keyboardJog) {
+        const label = JOG_KEYS[keyboardJog.key].toLowerCase();
+        $("jogHelp").textContent = `Holding ${label}. Release the arrow key to stop.`;
+      } else if (!connected || !freshStatus) {
+        $("jogHelp").textContent = "Connect the Arduino and wait for status to use keyboard jog.";
+      } else if (jogSpeed === null) {
+        $("jogHelp").textContent = "Keyboard jog requires V3.6 firmware.";
+      } else if (!idle) {
+        $("jogHelp").textContent = "Keyboard jog is available when the pump is idle.";
+      } else {
+        $("jogHelp").textContent = `Hold ← to jog backward or → to jog forward at ${jogSpeed} mm/s nominal. Release to stop.`;
+        if (!forwardForceReady()) {
+          $("jogHelp").textContent += " Forward jog requires force calibration and a cutoff.";
+        }
+      }
 
       $("connectBtn").textContent =
         connected
@@ -1138,13 +1162,13 @@
       $("connectBtn").disabled = busy;
 
       $("dirForward").disabled =
-        busy || (connected && !idle);
+        controlsBusy || (connected && !idle);
 
       $("dirBackward").disabled =
-        busy || (connected && !idle);
+        controlsBusy || (connected && !idle);
 
       $("startBtn").disabled =
-        !connected || !freshStatus || !idle || busy || !forceReady;
+        !connected || !freshStatus || !idle || controlsBusy || !forceReady;
 
       $("calibrateForce").disabled = !forceConfigAllowed;
       $("tareForce").disabled = !forceConfigAllowed || !forceCalibrated;
@@ -1162,7 +1186,7 @@
       $("pauseBtn").disabled =
         !connected ||
         !freshStatus ||
-        busy ||
+        controlsBusy ||
         !(running || paused);
 
       $("pauseBtn").textContent =
@@ -1172,26 +1196,27 @@
       $("stopBtn").disabled = !connected;
 
       $("rate").disabled =
-        busy || alarm;
+        controlsBusy || jogging || alarm;
 
       $("volume").disabled =
-        busy || (connected && !idle);
+        controlsBusy || (connected && !idle);
 
       $("applyRate").disabled =
         !connected ||
         !freshStatus ||
-        busy ||
+        controlsBusy ||
+        jogging ||
         alarm;
 
       $("applyVolume").disabled =
         !connected ||
         !freshStatus ||
-        busy ||
+        controlsBusy ||
         !idle;
 
       for (const size of [20, 50]) {
         $("size" + size).disabled =
-          busy || (connected && !idle);
+          controlsBusy || (connected && !idle);
       }
 
       const chip = $("connectionChip");
@@ -1213,7 +1238,7 @@
       $("state").className =
         "state" +
         (
-          running ? " running" :
+          running || jogging ? " running" :
           ["PAUSING", "PAUSED"].includes(pumpState)
             ? " paused" :
           ["FAULT", "ALARM"].includes(pumpState)
@@ -1246,7 +1271,7 @@
     // SERIAL WRITE
     // ==========================================
 
-    function sendLine(command) {
+    function sendLine(command, shouldSend = () => true) {
       const epoch = connectionEpoch;
 
       const next = writeQueue
@@ -1262,6 +1287,7 @@
             );
           }
 
+          if (!shouldSend()) return;
           await writer.write(
             encoder.encode(command + "\n")
           );
@@ -1279,7 +1305,8 @@
     function expectReply(
       command,
       expected,
-      timeoutMs = 3000
+      timeoutMs = 3000,
+      shouldSend
     ) {
       if (pendingAck) {
         return Promise.reject(
@@ -1312,7 +1339,7 @@
 
         log(`→ ${command}`);
 
-        sendLine(command).catch((error) => {
+        sendLine(command, shouldSend).catch((error) => {
           if (pendingAck === waiting) {
             pendingAck = null;
             clearTimeout(waiting.timeout);
@@ -1409,6 +1436,7 @@
       forceCalibrated = fields.get("FORCE CALIBRATED") === "YES";
       forceSampleUsable = validForce && forceStatus === "OK";
       forceCutoff = readNumber(fields, "FORCE LIMIT N");
+      jogSpeed = readNumber(fields, "JOG SPEED MM S");
       $("forceSetup").hidden = !forceSettingsAvailable;
       showReading("forceNewtons", forceCalibrated && forceSampleUsable
         ? readNumber(fields, "FORCE N") : null, " N");
@@ -1431,6 +1459,7 @@
 
     function expireStatus() {
       if (lastStatusAt !== null && Date.now() - lastStatusAt >= STATUS_EXPIRY_MS) {
+        stopKeyboardJog();
         clearStatus();
         notice("No recent status from the Arduino.", true);
       }
@@ -1447,16 +1476,20 @@
           const fields = statusFields;
           statusFields = null;
           const reportedState = fields.get("STATE");
-          if (["IDLE", "RUNNING", "PAUSING", "PAUSED", "COMPLETE", "ALARM", "FAULT"]
+          if (["IDLE", "RUNNING", "PAUSING", "PAUSED", "JOGGING", "COMPLETE", "ALARM", "FAULT"]
             .includes(reportedState)) {
             const awaitingStatus = lastStatusAt === null;
             pumpState = reportedState;
             lastStatusAt = Date.now();
             renderStatus(fields);
             if (reportedState === "ALARM" || reportedState === "FAULT") {
+              stopKeyboardJog(false);
               const reason = fields.get("ALARM REASON");
               if (reason) setForceAlarm(reason);
             } else {
+              if (keyboardJog?.confirmed && reportedState !== "JOGGING") {
+                stopKeyboardJog(false);
+              }
               setForceAlarm(null);
             }
             updateControls();
@@ -1488,6 +1521,7 @@
 
         if (line.startsWith("ALARM:")) {
           pumpState = "FAULT";
+          stopKeyboardJog(false);
           setForceAlarm(line.slice("ALARM:".length).trim());
         }
 
@@ -1518,6 +1552,10 @@
 
         "PUMP PAUSED": "PAUSED",
         "PUMP RESUMED": "RUNNING",
+        "JOG READY": "JOGGING",
+        "JOG STARTED": "JOGGING",
+        "JOG STOPPED": "IDLE",
+        "JOG TIMEOUT": "IDLE",
         "TARGET STEPS COMPLETE": "COMPLETE",
         "DECELERATING TO PAUSE": "PAUSING"
       };
@@ -1528,6 +1566,10 @@
       )) {
         pumpState = states[line];
 
+        if (["JOG STOPPED", "JOG TIMEOUT", "PUMP STOPPED"].includes(line)) {
+          stopKeyboardJog(false);
+          if (line === "JOG TIMEOUT") notice("Jog stopped after hold updates timed out.", true);
+        }
         if (line === "PUMP STARTED") {
           clearStatus();
         }
@@ -1622,6 +1664,7 @@
         if (!closing) {
           connected = false;
           connectionEpoch++;
+          stopKeyboardJog(false);
 
           clearInterval(timer);
 
@@ -1742,9 +1785,10 @@
     // ==========================================
 
     async function disconnect(force = false) {
+      stopKeyboardJog(!force);
       if (
         !force &&
-        ["RUNNING", "PAUSING", "PAUSED"]
+        ["RUNNING", "PAUSING", "PAUSED", "JOGGING"]
           .includes(pumpState)
       ) {
         notice(
@@ -1804,6 +1848,90 @@
       sendLine("STATUS").catch(error => notice(error.message, true));
     }
 
+    function forwardForceReady() {
+      return forceCalibrated && forceCutoff !== null && forceSampleUsable;
+    }
+
+    function isEditingField(target) {
+      return target?.closest?.("input, textarea, select, [contenteditable], [role=textbox]");
+    }
+
+    function stopKeyboardJog(sendStop = true) {
+      if (!keyboardJog) return;
+      clearInterval(keyboardJog.timer);
+      keyboardJog = null;
+      if (pendingAck?.expected === "JOG READY") cancelOperation("Jog released");
+
+      if (sendStop && connected) {
+        clearStatus();
+        sendLine("JOG STOP").then(requestStatus).catch(error => {
+          notice(`Jog stop could not be sent. The Arduino hold timeout is active. ${error.message}`, true);
+        });
+      } else {
+        updateControls();
+      }
+    }
+
+    function renewKeyboardJog(hold) {
+      if (keyboardJog !== hold || hold.writePending) return;
+      if (document.hidden || !document.hasFocus()) {
+        stopKeyboardJog();
+        return;
+      }
+
+      hold.writePending = true;
+      sendLine("JOG KEEP", () => keyboardJog === hold)
+        .catch(error => {
+          if (keyboardJog === hold) {
+            stopKeyboardJog();
+            notice(error.message, true);
+          }
+        })
+        .finally(() => { hold.writePending = false; });
+    }
+
+    async function startKeyboardJog(event) {
+      const requested = JOG_KEYS[event.key];
+      if (!requested || event.altKey || event.ctrlKey || event.metaKey ||
+          event.shiftKey || isEditingField(event.target)) return;
+
+      if (keyboardJog) {
+        event.preventDefault();
+        if (!event.repeat && event.key !== keyboardJog.key) stopKeyboardJog();
+        return;
+      }
+
+      expireStatus();
+      if (event.repeat || document.hidden || !document.hasFocus() ||
+          !connected || busy || lastStatusAt === null || jogSpeed === null ||
+          !["IDLE", "COMPLETE"].includes(pumpState)) return;
+
+      event.preventDefault();
+      if (requested === "FORWARD" && !forwardForceReady()) {
+        notice("Forward jog requires a fresh calibrated force reading and a cutoff.", true);
+        return;
+      }
+
+      const hold = { key: event.key, timer: null, confirmed: false, writePending: false };
+      keyboardJog = hold;
+      updateControls();
+      void enableAlarmSound();
+      try {
+        await expectReply(`JOG ${requested}`, "JOG READY", 500, () => keyboardJog === hold);
+        if (keyboardJog !== hold) return;
+        hold.confirmed = true;
+        renewKeyboardJog(hold);
+        if (keyboardJog === hold) {
+          hold.timer = setInterval(() => renewKeyboardJog(hold), JOG_KEEP_MS);
+        }
+      } catch (error) {
+        if (keyboardJog === hold) {
+          stopKeyboardJog();
+          notice(error.message, true);
+        }
+      }
+    }
+
     function saveForceCalibration() {
       const zeroText = $("forceZero").value.trim();
       const loadedText = $("forceLoaded").value.trim();
@@ -1844,7 +1972,7 @@
       isStart = false
     ) {
       expireStatus();
-      if (!connected || busy || lastStatusAt === null) {
+      if (!connected || busy || keyboardJog || lastStatusAt === null) {
         return;
       }
 
@@ -2039,6 +2167,10 @@
         return;
       }
 
+      if (keyboardJog || pumpState === "JOGGING") {
+        stopKeyboardJog(false);
+        clearStatus();
+      }
       // Stop cancels any pending START sequence.
       cancelOperation("Stopped by user");
 
@@ -2149,6 +2281,22 @@
       "click",
       stopPump
     );
+
+    window.addEventListener("keydown", startKeyboardJog);
+    window.addEventListener("keyup", event => {
+      if (event.key === keyboardJog?.key) {
+        event.preventDefault();
+        stopKeyboardJog();
+      }
+    });
+    window.addEventListener("blur", () => stopKeyboardJog());
+    window.addEventListener("pagehide", () => stopKeyboardJog());
+    document.addEventListener("focusin", event => {
+      if (isEditingField(event.target)) stopKeyboardJog();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) stopKeyboardJog();
+    });
 
     $("pauseBtn").addEventListener(
       "click",
