@@ -589,7 +589,7 @@
           </div>
         </div>
 
-        <div class="field">
+        <div class="field" id="rateField">
           <label for="rate" class="field-title">
             Flow rate
           </label>
@@ -616,6 +616,18 @@
             Enter any positive rate; the Arduino checks
             its motor-speed limit.
           </div>
+        </div>
+
+        <div class="field" id="retractSpeedField" hidden>
+          <label for="retractSpeed" class="field-title">Return speed</label>
+          <div class="input-row">
+            <div class="input-holder">
+              <input id="retractSpeed" type="text" inputmode="decimal" autocomplete="off">
+              <span class="unit">mm/s</span>
+            </div>
+            <button type="button" class="btn" id="applyRetractSpeed">Apply</button>
+          </div>
+          <div class="helper" id="retractSpeedHint"></div>
         </div>
 
         <div class="field" id="volumeField">
@@ -694,7 +706,7 @@
         <div class="metrics">
 
           <div>
-            <div class="eyebrow">Configured flow rate</div>
+            <div class="eyebrow" id="actualRateLabel">Configured flow rate</div>
             <div class="metric-value" id="actualRate">—</div>
           </div>
 
@@ -889,6 +901,7 @@
     let jogSpeed = null;
     let keyboardJog = null;
     let supportsHomeReturn = false;
+    let retractMaxSpeed = null;
     let maxCaptureReady = false;
     let maxTravelRecorded = false;
     let forceSettingsAvailable = false;
@@ -1007,7 +1020,24 @@
       return supportsHomeReturn && direction === "BACKWARD";
     }
 
+    function usingRetractSpeed() {
+      return returningHome() && retractMaxSpeed !== null;
+    }
+
+    function retractSpeedValue() {
+      const speed = numericValue("retractSpeed");
+      if (!(speed > 0 && speed <= Number(retractMaxSpeed)) ||
+          Math.abs(speed - Number(speed.toFixed(6))) > 1e-10) {
+        throw new Error(`Enter a return speed up to ${retractMaxSpeed} mm/s (up to 6 decimals).`);
+      }
+      return speed;
+    }
+
     function settings() {
+      if (usingRetractSpeed()) {
+        return { rate: null, retractSpeed: retractSpeedValue(), volume: null, syringe };
+      }
+
       const rate = numericValue("rate");
       const volume = returningHome() ? null : numericValue("volume");
 
@@ -1051,6 +1081,7 @@
 
       return {
         rate,
+        retractSpeed: null,
         volume,
         syringe
       };
@@ -1195,8 +1226,16 @@
       const forceReady = direction === "BACKWARD" || !forceSettingsAvailable ||
         forwardForceReady();
       const homeReturn = returningHome();
+      const retract = usingRetractSpeed();
       $("volumeField").hidden = homeReturn;
-      $("startHelp").textContent = homeReturn
+      $("rateField").hidden = retract;
+      $("retractSpeedField").hidden = !retract;
+      $("retractSpeedHint").textContent = retract
+        ? `Up to ${retractMaxSpeed} mm/s. The Arduino slows near HOME or when position is unknown.`
+        : "";
+      $("startHelp").textContent = retract
+        ? "Backward runs at the selected return speed until the HOME switch is pressed."
+        : homeReturn
         ? "Backward runs at the selected rate until the HOME switch is pressed."
         : "Start applies the syringe size, direction, flow rate and target volume in that order.";
 
@@ -1210,7 +1249,8 @@
       } else if (!idle) {
         $("jogHelp").textContent = "Keyboard jog is available when the pump is idle.";
       } else {
-        $("jogHelp").textContent = `Hold ← to jog backward or → to jog forward at ${jogSpeed} mm/s nominal. Release to stop.`;
+        const backwardSpeed = retractMaxSpeed ?? jogSpeed;
+        $("jogHelp").textContent = `Hold ← to jog backward up to ${backwardSpeed} mm/s or → to jog forward up to ${jogSpeed} mm/s. Release to stop.`;
         if (!forwardForceReady()) {
           $("jogHelp").textContent += " Forward jog requires force calibration and a cutoff.";
         }
@@ -1262,6 +1302,9 @@
 
       $("rate").disabled =
         controlsBusy || jogging || alarm;
+      $("retractSpeed").disabled = controlsBusy || (connected && !idle);
+      $("applyRetractSpeed").disabled =
+        !retract || !connected || !freshStatus || controlsBusy || !idle;
 
       $("volume").disabled =
         homeReturn || controlsBusy || (connected && !idle);
@@ -1461,13 +1504,25 @@
     function renderStatus(fields) {
       if (fields.has("STATE")) supportsHomeReturn = fields.get("BACKWARD STOP") === "HOME";
       const reportedDirection = fields.get("DIRECTION");
+      const reportedRetractSpeed = readNumber(fields, "RETRACT SPEED MM S");
+      if (fields.has("STATE")) {
+        const max = readNumber(fields, "RETRACT MAX MM S");
+        if (retractMaxSpeed === null && max !== null && reportedRetractSpeed !== null) {
+          $("retractSpeed").value = String(Number(reportedRetractSpeed));
+        }
+        retractMaxSpeed = max;
+      }
       showReading("actualDirection",
         ["FORWARD", "BACKWARD"].includes(reportedDirection)
           ? reportedDirection : null
       );
       const reportedSyringe = readNumber(fields, "SYRINGE");
       showReading("actualSyringe", reportedSyringe, " mL");
-      showReading("actualRate", readNumber(fields, "FLOW RATE", "mL/min"), " mL/min");
+      const reportRetractSpeed = reportedDirection === "BACKWARD" && reportedRetractSpeed !== null;
+      $("actualRateLabel").textContent = reportRetractSpeed ? "Configured return speed" : "Configured flow rate";
+      showReading("actualRate",
+        reportRetractSpeed ? reportedRetractSpeed : readNumber(fields, "FLOW RATE", "mL/min"),
+        reportRetractSpeed ? " mm/s" : " mL/min");
       showReading("rpm", readNumber(fields, "CURRENT RPM", "RPM"), " RPM");
 
       const stepMatch = /^(\d+)\s*\/\s*(\d+)$/.exec(fields.get("STEPS") ?? "");
@@ -1544,7 +1599,10 @@
     }
 
     function clearStatus() {
-      if (!connected) supportsHomeReturn = false;
+      if (!connected) {
+        supportsHomeReturn = false;
+        retractMaxSpeed = null;
+      }
       statusFields = null;
       lastStatusAt = null;
       renderStatus(new Map());
@@ -2180,9 +2238,13 @@
 
       const commands = [
         [`SYRINGE ${values.syringe}`, "SYRINGE UPDATED"],
-        [`DIRECTION ${direction}`, "DIRECTION UPDATED"],
-        [`RATE ${values.rate.toFixed(6)}`, "FLOW RATE UPDATED"]
+        [`DIRECTION ${direction}`, "DIRECTION UPDATED"]
       ];
+      if (values.retractSpeed !== null) {
+        commands.push([`RETRACT ${values.retractSpeed.toFixed(6)}`, "RETRACT SPEED UPDATED"]);
+      } else {
+        commands.push([`RATE ${values.rate.toFixed(6)}`, "FLOW RATE UPDATED"]);
+      }
       if (values.volume !== null) {
         commands.push([`VOLUME ${values.volume.toFixed(3)}`, "TARGET VOLUME UPDATED"]);
       }
@@ -2224,6 +2286,21 @@
         ],
 
         "Flow rate updated."
+      );
+    }
+
+    async function applyRetractSpeed() {
+      if (!usingRetractSpeed()) return;
+      let speed;
+      try {
+        speed = retractSpeedValue();
+      } catch (error) {
+        notice(error.message, true);
+        return;
+      }
+      await runCommands(
+        [[`RETRACT ${speed.toFixed(6)}`, "RETRACT SPEED UPDATED"]],
+        "Return speed updated."
       );
     }
 
@@ -2361,6 +2438,10 @@
       "click",
       applyRate
     );
+    $("applyRetractSpeed").addEventListener("click", applyRetractSpeed);
+    $("retractSpeed").addEventListener("keydown", event => {
+      if (event.key === "Enter") applyRetractSpeed();
+    });
 
     $("applyVolume").addEventListener(
       "click",
