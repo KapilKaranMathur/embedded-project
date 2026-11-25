@@ -6,7 +6,7 @@
 #include "ForceSensor.h"
 
 // =====================================================
-// SYRINGE PUMP V3.4
+// SYRINGE PUMP V3.5
 // Arduino Mega 2560 + RAMPS 1.4 + A4988
 // FORWARD / BACKWARD MOTOR CONTROL
 // Non-medical benchtop prototype
@@ -60,6 +60,7 @@ enum Direction {
 PumpState state = IDLE;
 Direction direction = FORWARD;
 Direction runDirection = FORWARD;
+const char* alarmReason = nullptr;
 
 // Motion variables
 float currentHz = 0.0f;
@@ -160,6 +161,7 @@ void triggerAlarm(const char* reason) {
 
   disableMotor();
   state = ALARM;
+  alarmReason = reason;
 
   Serial.print(F("ALARM: "));
   Serial.println(reason);
@@ -204,6 +206,17 @@ void startPump() {
     return;
   }
 
+  if (direction == FORWARD) {
+    if (!forceLimitConfigured()) {
+      Serial.println(F("ERROR: CALIBRATE FORCE AND SET A LIMIT BEFORE FORWARD START"));
+      return;
+    }
+    if (const char* fault = forceFault()) {
+      triggerAlarm(fault);
+      return;
+    }
+  }
+
   float requestedSteps = targetVolume * stepsPerML;
 
   if (!(requestedSteps >= 1.0f &&
@@ -215,6 +228,7 @@ void startPump() {
   targetSteps = (unsigned long)(requestedSteps + 0.5f);
   deliveredSteps = 0;
   runDirection = direction;
+  resetForcePeak();
 
   currentHz = 0.0f;
   stepCredit = 0.0f;
@@ -230,7 +244,6 @@ void startPump() {
   delayMicroseconds(5);
 
   // Enable A4988 (active LOW)
-  updateForceSensor(false);
   digitalWrite(EN_PIN, LOW);
 
   lastUpdateUs = micros();
@@ -440,6 +453,10 @@ void printStatus() {
 
   Serial.print(F("STATE: "));
   Serial.println(stateName());
+  if (alarmReason) {
+    Serial.print(F("ALARM REASON: "));
+    Serial.println(alarmReason);
+  }
 
   Serial.print(F("SYRINGE: "));
   Serial.println(syringeSize);
@@ -535,12 +552,7 @@ void processCommand(char* command) {
   }
 
   else if (strcmp(command, "FORCE") == 0) {
-    if (argument && (strcmp(argument, "RAW") == 0 ||
-                     strcmp(argument, "STATUS") == 0)) {
-      printForceStatus();
-    } else {
-      Serial.println(F("ERROR: USE FORCE RAW OR FORCE STATUS"));
-    }
+    processForceCommand(argument, state == IDLE || state == COMPLETE);
   }
 
   // ---------------- PING ----------------
@@ -771,7 +783,7 @@ void setup() {
   lastContactMs = millis();
   lastUpdateUs = micros();
 
-  Serial.println(F("SYRINGE PUMP V3.4 READY"));
+  Serial.println(F("SYRINGE PUMP V3.5 READY"));
   Serial.println(
     F("DIRECTION: FORWARD / BACKWARD")
   );
@@ -793,8 +805,13 @@ void loop() {
   }
 
   checkWatchdog();
+  const bool active = state == RUNNING || state == PAUSING || state == PAUSED;
+  updateForceSensor(active);
+  if (active && runDirection == FORWARD) {
+    if (const char* fault = forceFault()) {
+      triggerAlarm(fault);
+    }
+  }
   updateMotion();
-  // The HX711 transfer masks interrupts on AVR. Sample with the driver disabled.
-  updateForceSensor(state == IDLE || state == COMPLETE || state == ALARM);
   readSerialCommands();
 }
