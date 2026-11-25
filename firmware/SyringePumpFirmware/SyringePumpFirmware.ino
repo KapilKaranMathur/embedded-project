@@ -8,7 +8,7 @@
 #include "VolumeCalibration.h"
 
 // =====================================================
-// SYRINGE PUMP V4.5
+// SYRINGE PUMP V4.6
 // Arduino Mega 2560 + RAMPS 1.4 + A4988
 // FORWARD / BACKWARD MOTOR CONTROL
 // Non-medical benchtop prototype
@@ -335,7 +335,8 @@ void triggerAlarm(const char* reason) {
   Serial.println(reason);
 
   Serial.println(F("MOTOR DISABLED"));
-  if (strcmp(reason, "MAX SWITCH BEFORE TARGET VOLUME") == 0) {
+  if (strcmp(reason, "MAX SWITCH BEFORE TARGET VOLUME") == 0 ||
+      strcmp(reason, "HOME SWITCH DID NOT RELEASE") == 0) {
     Serial.println(F("ACK LIMIT OR RESET REQUIRED"));
   } else {
     Serial.println(F("RESET REQUIRED"));
@@ -354,20 +355,34 @@ void stopPump() {
 }
 
 void acknowledgeLimitAlarm() {
-  if (state != ALARM || !alarmReason ||
-      strcmp(alarmReason, "MAX SWITCH BEFORE TARGET VOLUME") != 0) {
+  if (state != ALARM || !alarmReason) {
     Serial.println(F("ERROR: NO RECOVERABLE LIMIT ALARM"));
     return;
   }
 
-  // MAX may remain pressed while the carriage begins a backward recovery jog.
-  // HOME must not also be active because the physical switch state is unsafe.
-  if (homePressed()) {
+  const bool recoverFromMax =
+    strcmp(alarmReason, "MAX SWITCH BEFORE TARGET VOLUME") == 0;
+  const bool recoverFromHome =
+    strcmp(alarmReason, "HOME SWITCH DID NOT RELEASE") == 0;
+  if (!recoverFromMax && !recoverFromHome) {
+    Serial.println(F("ERROR: NO RECOVERABLE LIMIT ALARM"));
+    return;
+  }
+
+  if (recoverFromMax && homePressed()) {
     Serial.println(F("ERROR: RELEASE HOME SWITCH"));
+    return;
+  }
+  if (recoverFromHome && maxPressed()) {
+    Serial.println(F("ERROR: RELEASE MAX SWITCH"));
     return;
   }
 
   disableMotor();
+  if (recoverFromHome) {
+    // A forward retry receives one fresh bounded HOME-release allowance.
+    homeDepartureSteps = 0;
+  }
   state = IDLE;
   alarmReason = nullptr;
   returnRun = false;
@@ -1240,7 +1255,7 @@ void setup() {
   lastContactMs = millis();
   lastUpdateUs = micros();
 
-  Serial.println(F("SYRINGE PUMP V4.5 READY"));
+  Serial.println(F("SYRINGE PUMP V4.6 READY"));
   Serial.println(
     F("DIRECTION: FORWARD / BACKWARD")
   );
