@@ -5,9 +5,10 @@
 #include <ctype.h>
 #include <limits.h>
 #include "ForceSensor.h"
+#include "VolumeCalibration.h"
 
 // =====================================================
-// SYRINGE PUMP V4.2
+// SYRINGE PUMP V4.3
 // Arduino Mega 2560 + RAMPS 1.4 + A4988
 // FORWARD / BACKWARD MOTOR CONTROL
 // Non-medical benchtop prototype
@@ -115,7 +116,8 @@ bool commandOverflow = false;
 
 void calculateSyringe() {
   float areaMM2 = PI * boreMM * boreMM / 4.0f;
-  stepsPerML = STEPS_PER_MM * 1000.0f / areaMM2;
+  const float provisionalStepsPerML = STEPS_PER_MM * 1000.0f / areaMM2;
+  stepsPerML = applySavedVolumeCalibration(syringeSize, provisionalStepsPerML);
 }
 
 float rateHz(float rate) {
@@ -842,6 +844,7 @@ void printStatus() {
 
   Serial.print(F("MAX FLOW: "));
   Serial.println(maxRate(), 3);
+  printVolumeCalibrationStatus(syringeSize, stepsPerML);
 
   Serial.print(F("JOG SPEED MM S: "));
   Serial.println(JOG_STEP_HZ / STEPS_PER_MM, 2);
@@ -1092,6 +1095,21 @@ void processCommand(char* command) {
       return;
     }
 
+    const float areaMM2 = PI * boreMM * boreMM / 4.0f;
+    const float provisionalStepsPerML = STEPS_PER_MM * 1000.0f / areaMM2;
+    if (processVolumeCalibrationCommand(
+          argument,
+          syringeSize,
+          stepsPerML,
+          provisionalStepsPerML,
+          true
+        )) {
+      deliveredSteps = 0;
+      targetSteps = 0;
+      returnRun = false;
+      return;
+    }
+
     float newVolume;
 
     if (
@@ -1179,13 +1197,14 @@ void setup() {
 
   Serial.begin(115200);
 
+  beginVolumeCalibration();
   calculateSyringe();
   beginForceSensor();
 
   lastContactMs = millis();
   lastUpdateUs = micros();
 
-  Serial.println(F("SYRINGE PUMP V4.2 READY"));
+  Serial.println(F("SYRINGE PUMP V4.3 READY"));
   Serial.println(
     F("DIRECTION: FORWARD / BACKWARD")
   );
