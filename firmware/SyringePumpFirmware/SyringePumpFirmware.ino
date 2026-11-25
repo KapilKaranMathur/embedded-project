@@ -8,7 +8,7 @@
 #include "VolumeCalibration.h"
 
 // =====================================================
-// SYRINGE PUMP V4.3
+// SYRINGE PUMP V4.4
 // Arduino Mega 2560 + RAMPS 1.4 + A4988
 // FORWARD / BACKWARD MOTOR CONTROL
 // Non-medical benchtop prototype
@@ -411,8 +411,10 @@ bool forwardDosePathClear() {
     return false;
   }
   if (maxPressed()) {
-    triggerAlarm("LIMIT SWITCH");
-    return false;
+    if (deliveredSteps < targetSteps) {
+      triggerAlarm("MAX SWITCH BEFORE TARGET VOLUME");
+      return false;
+    }
   }
   return forwardHomeClear();
 }
@@ -1204,7 +1206,7 @@ void setup() {
   lastContactMs = millis();
   lastUpdateUs = micros();
 
-  Serial.println(F("SYRINGE PUMP V4.3 READY"));
+  Serial.println(F("SYRINGE PUMP V4.4 READY"));
   Serial.println(
     F("DIRECTION: FORWARD / BACKWARD")
   );
