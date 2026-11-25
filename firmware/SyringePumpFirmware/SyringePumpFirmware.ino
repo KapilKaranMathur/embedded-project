@@ -3,10 +3,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 #include "ForceSensor.h"
 
 // =====================================================
-// SYRINGE PUMP V3.7
+// SYRINGE PUMP V3.8
 // Arduino Mega 2560 + RAMPS 1.4 + A4988
 // FORWARD / BACKWARD MOTOR CONTROL
 // Non-medical benchtop prototype
@@ -68,6 +69,13 @@ Direction jogDirection = FORWARD;
 bool jogMotorEnabled = false;
 unsigned long lastJogKeepMs = 0;
 const char* alarmReason = nullptr;
+
+// Carriage position is estimated from STEP pulses since the last HOME hit.
+bool positionKnown = false;
+unsigned long positionSteps = 0;
+unsigned long measuredMaxSteps = 0;
+unsigned long forwardLimitSteps = 0;
+bool maxReachedByJog = false;
 
 // Motion variables
 float currentHz = 0.0f;
@@ -150,6 +158,104 @@ bool limitPressed() { return homePressed() || maxPressed(); }
 bool bothLimitsPressed() { return homePressed() && maxPressed(); }
 bool runActive() { return state == RUNNING || state == PAUSING || state == PAUSED; }
 
+void referenceHome() {
+  positionSteps = 0;
+  positionKnown = true;
+  maxReachedByJog = false;
+}
+
+void trackTravelStep(Direction moved) {
+  if (!positionKnown) return;
+  if (moved == BACKWARD) {
+    if (positionSteps > 0) --positionSteps;
+    else positionKnown = false;
+  } else if (positionSteps < ULONG_MAX) {
+    ++positionSteps;
+  } else {
+    positionKnown = false;
+  }
+}
+
+unsigned long remainingForwardSteps() {
+  return positionSteps < forwardLimitSteps ? forwardLimitSteps - positionSteps : 0;
+}
+
+bool checkForwardTravel(Direction requested, unsigned long steps) {
+  if (requested != FORWARD || measuredMaxSteps == 0) return true;
+  if (!positionKnown) {
+    Serial.println(F("ERROR: RETURN TO HOME TO RESTORE POSITION"));
+    return false;
+  }
+  if (steps > remainingForwardSteps()) {
+    Serial.println(F("ERROR: TARGET EXCEEDS REMAINING FORWARD TRAVEL"));
+    return false;
+  }
+  return true;
+}
+
+bool maxCaptureReady() {
+  return maxReachedByJog && positionKnown && positionSteps > 0 &&
+    maxPressed() && !homePressed();
+}
+
+void processTravelCommand(const char* argument) {
+  if (state != IDLE && state != COMPLETE) {
+    Serial.println(F("ERROR: TRAVEL SETTINGS REQUIRE IDLE OR COMPLETE"));
+    return;
+  }
+
+  if (argument && strcmp(argument, "CLEAR") == 0) {
+    measuredMaxSteps = 0;
+    forwardLimitSteps = 0;
+    maxReachedByJog = false;
+    Serial.println(F("MAX TRAVEL CLEARED"));
+    return;
+  }
+
+  if (!argument || strncmp(argument, "MAX ", 4) != 0) {
+    Serial.println(F("ERROR: USE TRAVEL MAX <CLEARANCE MM> OR TRAVEL CLEAR"));
+    return;
+  }
+  if (!maxCaptureReady()) {
+    Serial.println(F("ERROR: RETURN TO HOME THEN JOG TO MAX BEFORE RECORDING"));
+    return;
+  }
+  float clearanceMm;
+  if (!positiveNumber(argument + 4, clearanceMm)) {
+    Serial.println(F("ERROR: ENTER POSITIVE MAX CLEARANCE IN MM"));
+    return;
+  }
+  const float clearanceSteps = ceilf(clearanceMm * STEPS_PER_MM);
+  if (!(clearanceSteps >= 1.0f && clearanceSteps < positionSteps)) {
+    Serial.println(F("ERROR: CLEARANCE MUST BE LESS THAN MEASURED TRAVEL"));
+    return;
+  }
+
+  measuredMaxSteps = positionSteps;
+  forwardLimitSteps = measuredMaxSteps - static_cast<unsigned long>(clearanceSteps);
+  Serial.println(F("MAX TRAVEL RECORDED"));
+}
+
+void printTravelValue(const __FlashStringHelper* label, bool available, unsigned long steps) {
+  Serial.print(label);
+  if (available) Serial.println(steps / STEPS_PER_MM, 3);
+  else Serial.println(F("NA"));
+}
+
+void printTravelStatus() {
+  Serial.print(F("HOME SWITCH: "));
+  Serial.println(homePressed() ? F("PRESSED") : F("RELEASED"));
+  Serial.print(F("MAX SWITCH: "));
+  Serial.println(maxPressed() ? F("PRESSED") : F("RELEASED"));
+  printTravelValue(F("POSITION MM: "), positionKnown, positionSteps);
+  const bool measured = measuredMaxSteps > 0;
+  printTravelValue(F("MAX TRAVEL MM: "), measured, measuredMaxSteps);
+  printTravelValue(F("FORWARD LIMIT MM: "), measured, forwardLimitSteps);
+  printTravelValue(F("FORWARD ROOM MM: "), measured && positionKnown, remainingForwardSteps());
+  Serial.print(F("MAX CAPTURE READY: "));
+  Serial.println(maxCaptureReady() ? F("YES") : F("NO"));
+}
+
 // =====================================================
 // MOTOR SAFETY
 // =====================================================
@@ -171,6 +277,8 @@ void triggerAlarm(const char* reason) {
   disableMotor();
   state = ALARM;
   alarmReason = reason;
+  positionKnown = false;
+  maxReachedByJog = false;
 
   Serial.print(F("ALARM: "));
   Serial.println(reason);
@@ -223,6 +331,7 @@ bool checkForwardForce(Direction requested) {
 }
 
 void enableMotion(Direction requested) {
+  maxReachedByJog = false;
   currentHz = 0.0f;
   stepCredit = 0.0f;
 
@@ -244,6 +353,7 @@ bool returnPathClear() {
 
   if (runActive()) {
     disableMotor();
+    referenceHome();
     state = COMPLETE;
     Serial.println(F("HOME REACHED"));
   } else {
@@ -278,6 +388,7 @@ void startPump() {
     }
     moveTarget = (unsigned long)(requestedSteps + 0.5f);
   }
+  if (!checkForwardTravel(direction, moveTarget)) return;
 
   targetSteps = moveTarget;
   deliveredSteps = 0;
@@ -300,6 +411,11 @@ void finishJog(const __FlashStringHelper* message) {
   Serial.println(message);
 }
 
+void timeoutJog() {
+  if (jogMotorEnabled) positionKnown = false;
+  finishJog(F("JOG TIMEOUT"));
+}
+
 bool jogPathClear(Direction requested) {
   const bool home = homePressed();
   const bool max = maxPressed();
@@ -312,6 +428,10 @@ bool jogPathClear(Direction requested) {
   if (!(towardHome ? home : max)) return true;
 
   if (state == JOGGING) {
+    if (jogMotorEnabled) {
+      if (towardHome) referenceHome();
+      else maxReachedByJog = positionKnown && positionSteps > 0;
+    }
     finishJog(towardHome ? F("JOG HOME REACHED") : F("JOG MAX REACHED"));
   } else {
     Serial.println(towardHome ? F("ERROR: HOME LIMIT ACTIVE") : F("ERROR: MAX LIMIT ACTIVE"));
@@ -320,7 +440,8 @@ bool jogPathClear(Direction requested) {
 }
 
 void prepareJog(Direction requested) {
-  if (!motionAvailable() || !jogPathClear(requested) || !checkForwardForce(requested)) return;
+  if (!motionAvailable() || !jogPathClear(requested) ||
+      !checkForwardTravel(requested, 1) || !checkForwardForce(requested)) return;
 
   jogDirection = requested;
   lastJogKeepMs = millis();
@@ -333,13 +454,13 @@ void keepJog() {
   if (state != JOGGING) return;
   const unsigned long now = millis();
   if (now - lastJogKeepMs >= JOG_TIMEOUT_MS) {
-    finishJog(F("JOG TIMEOUT"));
+    timeoutJog();
     return;
   }
 
   if (!jogMotorEnabled) {
-    if (!jogPathClear(jogDirection)) return;
-    if (!checkForwardForce(jogDirection)) return;
+    if (!jogPathClear(jogDirection) || !checkForwardTravel(jogDirection, 1) ||
+        !checkForwardForce(jogDirection)) return;
     enableMotion(jogDirection);
     jogMotorEnabled = true;
     Serial.println(F("JOG STARTED"));
@@ -431,6 +552,14 @@ void updateMotion() {
     const unsigned long remaining = targetSteps - deliveredSteps;
     const float stoppingHz = sqrtf(2.0f * ACCEL * remaining);
     if (desiredHz > stoppingHz) desiredHz = stoppingHz;
+  } else if (jogging && jogDirection == FORWARD && measuredMaxSteps > 0) {
+    const unsigned long remaining = remainingForwardSteps();
+    if (!positionKnown || remaining == 0) {
+      finishJog(F("JOG TRAVEL LIMIT"));
+      return;
+    }
+    const float stoppingHz = sqrtf(2.0f * ACCEL * remaining);
+    if (desiredHz > stoppingHz) desiredHz = stoppingHz;
   }
 
   // Acceleration / deceleration
@@ -480,6 +609,7 @@ void updateMotion() {
     lastStepUs = micros();
 
     stepCredit -= 1.0f;
+    trackTravelStep(jogging ? jogDirection : runDirection);
 
     if (!jogging) {
       ++deliveredSteps;
@@ -510,7 +640,7 @@ void updateMotion() {
 
 void checkWatchdog() {
   if (state == JOGGING) {
-    if (millis() - lastJogKeepMs >= JOG_TIMEOUT_MS) finishJog(F("JOG TIMEOUT"));
+    if (millis() - lastJogKeepMs >= JOG_TIMEOUT_MS) timeoutJog();
     return;
   }
 
@@ -602,6 +732,7 @@ void printStatus() {
     Serial.println(jogDirection == FORWARD ? F("FORWARD") : F("BACKWARD"));
   }
 
+  printTravelStatus();
   printForceStatus();
   Serial.println(F("---------------------------"));
 }
@@ -657,6 +788,10 @@ void processCommand(char* command) {
 
   else if (strcmp(command, "FORCE") == 0) {
     processForceCommand(argument, state == IDLE || state == COMPLETE);
+  }
+
+  else if (strcmp(command, "TRAVEL") == 0) {
+    processTravelCommand(argument);
   }
 
   else if (strcmp(command, "JOG") == 0) {
@@ -902,7 +1037,7 @@ void setup() {
   lastContactMs = millis();
   lastUpdateUs = micros();
 
-  Serial.println(F("SYRINGE PUMP V3.7 READY"));
+  Serial.println(F("SYRINGE PUMP V3.8 READY"));
   Serial.println(
     F("DIRECTION: FORWARD / BACKWARD")
   );
