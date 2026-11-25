@@ -8,7 +8,7 @@
 #include "VolumeCalibration.h"
 
 // =====================================================
-// SYRINGE PUMP V4.4
+// SYRINGE PUMP V4.5
 // Arduino Mega 2560 + RAMPS 1.4 + A4988
 // FORWARD / BACKWARD MOTOR CONTROL
 // Non-medical benchtop prototype
@@ -335,7 +335,11 @@ void triggerAlarm(const char* reason) {
   Serial.println(reason);
 
   Serial.println(F("MOTOR DISABLED"));
-  Serial.println(F("RESET REQUIRED"));
+  if (strcmp(reason, "MAX SWITCH BEFORE TARGET VOLUME") == 0) {
+    Serial.println(F("ACK LIMIT OR RESET REQUIRED"));
+  } else {
+    Serial.println(F("RESET REQUIRED"));
+  }
 }
 
 void stopPump() {
@@ -347,6 +351,28 @@ void stopPump() {
   }
 
   Serial.println(F("PUMP STOPPED"));
+}
+
+void acknowledgeLimitAlarm() {
+  if (state != ALARM || !alarmReason ||
+      strcmp(alarmReason, "MAX SWITCH BEFORE TARGET VOLUME") != 0) {
+    Serial.println(F("ERROR: NO RECOVERABLE LIMIT ALARM"));
+    return;
+  }
+
+  // MAX may remain pressed while the carriage begins a backward recovery jog.
+  // HOME must not also be active because the physical switch state is unsafe.
+  if (homePressed()) {
+    Serial.println(F("ERROR: RELEASE HOME SWITCH"));
+    return;
+  }
+
+  disableMotor();
+  state = IDLE;
+  alarmReason = nullptr;
+  returnRun = false;
+  lastContactMs = millis();
+  Serial.println(F("LIMIT ALARM ACKNOWLEDGED"));
 }
 
 // =====================================================
@@ -922,6 +948,14 @@ void processCommand(char* command) {
     processTravelCommand(argument);
   }
 
+  else if (strcmp(command, "ACK") == 0) {
+    if (argument && strcmp(argument, "LIMIT") == 0) {
+      acknowledgeLimitAlarm();
+    } else {
+      Serial.println(F("ERROR: INVALID ACK COMMAND"));
+    }
+  }
+
   else if (strcmp(command, "JOG") == 0) {
     if (argument && strcmp(argument, "FORWARD") == 0) {
       prepareJog(FORWARD, false);
@@ -1206,7 +1240,7 @@ void setup() {
   lastContactMs = millis();
   lastUpdateUs = micros();
 
-  Serial.println(F("SYRINGE PUMP V4.4 READY"));
+  Serial.println(F("SYRINGE PUMP V4.5 READY"));
   Serial.println(
     F("DIRECTION: FORWARD / BACKWARD")
   );
