@@ -633,8 +633,8 @@
         <div class="divider"></div>
 
         <div class="duration">
-          <span>Estimated duration</span>
-          <strong id="duration">12 seconds</strong>
+          <span>Ideal time from settings</span>
+          <strong id="duration">—</strong>
         </div>
 
         <p class="helper">
@@ -655,22 +655,20 @@
         </div>
 
         <div class="eyebrow">
-          Arduino direction:
+          Configured direction:
           <strong id="actualDirection">—</strong>
         </div>
 
-        <div class="eyebrow" id="deliveredCaption">
-          Estimated delivered volume
-        </div>
+        <div class="eyebrow" id="deliveredCaption">Estimated volume equivalent</div>
 
         <div class="delivered">
-          <span id="delivered">0.0000</span>
-          <small>mL</small>
+          <span id="delivered">—</span>
+          <small id="deliveredUnit" hidden>mL</small>
         </div>
 
         <div class="progress-head">
-          <span>Dose progress</span>
-          <strong id="percent">0.0%</strong>
+          <span>Commanded step progress</span>
+          <strong id="percent">—</strong>
         </div>
 
         <div class="track">
@@ -680,23 +678,33 @@
         <div class="metrics">
 
           <div>
-            <div class="eyebrow">Configured rate</div>
+            <div class="eyebrow">Configured flow rate</div>
             <div class="metric-value" id="actualRate">—</div>
           </div>
 
           <div>
-            <div class="eyebrow">Target volume</div>
+            <div class="eyebrow">Configured target (mL equivalent)</div>
             <div class="metric-value" id="actualVolume">—</div>
           </div>
 
           <div>
-            <div class="eyebrow">Motor speed</div>
-            <div class="metric-value" id="rpm">0 RPM</div>
+            <div class="eyebrow">Motor speed setpoint</div>
+            <div class="metric-value" id="rpm">—</div>
           </div>
 
           <div>
-            <div class="eyebrow">Motor steps</div>
-            <div class="metric-value" id="steps">0 / 0</div>
+            <div class="eyebrow">Commanded steps</div>
+            <div class="metric-value" id="steps">—</div>
+          </div>
+
+          <div>
+            <div class="eyebrow">Configured syringe</div>
+            <div class="metric-value" id="actualSyringe">—</div>
+          </div>
+
+          <div>
+            <div class="eyebrow">Estimated travel</div>
+            <div class="metric-value" id="travel">—</div>
           </div>
 
         </div>
@@ -731,6 +739,20 @@
              role="status"
              aria-live="polite">
           Connect the Arduino to begin.
+        </div>
+
+        <div class="divider"></div>
+        <h2>Load cell diagnostics</h2>
+        <p class="helper" id="forceHealth">Connect the Arduino to view sensor status.</p>
+        <div class="metrics">
+          <div>
+            <div class="eyebrow">Raw ADC counts</div>
+            <div class="metric-value" id="forceRaw">—</div>
+          </div>
+          <div>
+            <div class="eyebrow">Sample age at report</div>
+            <div class="metric-value" id="forceAge">—</div>
+          </div>
         </div>
 
       </section>
@@ -768,6 +790,10 @@
     let syringe = 20;
     let direction = "FORWARD";
     let pumpState = "DISCONNECTED";
+    let statusFields = null;
+    let lastStatusAt = null;
+    const STATUS_POLL_MS = 4000;
+    const STATUS_EXPIRY_MS = 12000;
 
     let rx = "";
     let timer = null;
@@ -882,15 +908,16 @@
     // ==========================================
 
     function updateDuration() {
-      const rate = numericValue("rate");
-      const volume = numericValue("volume");
+      let values;
 
-      if (!(rate > 0) || !(volume > 0)) {
+      try {
+        values = settings();
+      } catch (_) {
         $("duration").textContent = "—";
         return;
       }
 
-      const seconds = (volume / rate) * 60;
+      const seconds = (values.volume / values.rate) * 60;
 
       $("duration").textContent =
         seconds < 60
@@ -984,11 +1011,6 @@
           ? "Forward: advances the plunger."
           : "Backward: retracts the plunger.";
 
-      $("deliveredCaption").textContent =
-        next === "FORWARD"
-          ? "Estimated delivered volume"
-          : "Estimated reverse travel (mL equivalent)";
-
       $("volumeCaption").textContent =
         next === "FORWARD"
           ? "Target volume"
@@ -1003,6 +1025,8 @@
 
       const running = pumpState === "RUNNING";
       const paused = pumpState === "PAUSED";
+      const freshStatus = lastStatusAt !== null;
+      const alarm = ["FAULT", "ALARM"].includes(pumpState);
 
       $("connectBtn").textContent =
         connected
@@ -1018,7 +1042,7 @@
         busy || (connected && !idle);
 
       $("startBtn").disabled =
-        !connected || !idle || busy;
+        !connected || !freshStatus || !idle || busy;
 
       $("startBtn").textContent =
         busy
@@ -1031,6 +1055,7 @@
 
       $("pauseBtn").disabled =
         !connected ||
+        !freshStatus ||
         busy ||
         !(running || paused);
 
@@ -1041,18 +1066,20 @@
       $("stopBtn").disabled = !connected;
 
       $("rate").disabled =
-        busy || pumpState === "FAULT";
+        busy || alarm;
 
       $("volume").disabled =
         busy || (connected && !idle);
 
       $("applyRate").disabled =
         !connected ||
+        !freshStatus ||
         busy ||
-        pumpState === "FAULT";
+        alarm;
 
       $("applyVolume").disabled =
         !connected ||
+        !freshStatus ||
         busy ||
         !idle;
 
@@ -1071,7 +1098,11 @@
       chip.className =
         "chip" + (connected ? " connected" : "");
 
-      $("state").textContent = pumpState;
+      $("state").textContent =
+        connected && !freshStatus && !alarm &&
+        pumpState !== "CONNECTING"
+          ? "AWAITING STATUS"
+          : pumpState;
 
       $("state").className =
         "state" +
@@ -1189,88 +1220,129 @@
     // PROCESS ARDUINO RESPONSES
     // ==========================================
 
+    function readNumber(fields, name, unit = "") {
+      const rawValue = fields.get(name) ?? "";
+      const value = unit && rawValue.endsWith(unit)
+        ? rawValue.slice(0, -unit.length).trim()
+        : rawValue;
+      return /^\d+(?:\.\d+)?$/.test(value) &&
+        Number.isFinite(Number(value))
+        ? value
+        : null;
+    }
+
+    function showReading(id, value, unit = "") {
+      $(id).textContent = value === null ? "—" : `${value}${unit}`;
+    }
+
+    function renderStatus(fields) {
+      const reportedDirection = fields.get("DIRECTION");
+      showReading("actualDirection",
+        ["FORWARD", "BACKWARD"].includes(reportedDirection)
+          ? reportedDirection : null
+      );
+      const reportedSyringe = readNumber(fields, "SYRINGE");
+      showReading("actualSyringe", reportedSyringe, " mL");
+      showReading("actualRate", readNumber(fields, "FLOW RATE", "mL/min"), " mL/min");
+      showReading("actualVolume", readNumber(fields, "TARGET VOLUME", "mL"), " mL");
+      showReading("rpm", readNumber(fields, "CURRENT RPM", "RPM"), " RPM");
+
+      const stepMatch = /^(\d+)\s*\/\s*(\d+)$/.exec(fields.get("STEPS") ?? "");
+      const done = stepMatch ? Number(stepMatch[1]) : null;
+      const target = stepMatch ? Number(stepMatch[2]) : null;
+      const hasRun = Number.isSafeInteger(done) && Number.isSafeInteger(target) &&
+        target > 0 && done <= target;
+      const percent = hasRun ? done / target * 100 : 0;
+      showReading("steps", hasRun ? `${done} / ${target}` : null);
+      const displayPercent = done === target ? percent : Math.min(percent, 99.9);
+      showReading("percent", hasRun ? displayPercent.toFixed(1) : null, "%");
+      $("progress").style.width = `${percent}%`;
+
+      const runDirection = fields.get("RUN DIRECTION");
+      $("deliveredCaption").textContent =
+        hasRun && runDirection === "FORWARD" ? "Estimated delivered volume" :
+        hasRun && runDirection === "BACKWARD" ? "Estimated reverse travel (mL equivalent)" :
+        "Estimated volume equivalent";
+      const delivered = hasRun ? readNumber(fields, "ESTIMATED DELIVERED", "mL") : null;
+      showReading("delivered", delivered);
+      $("deliveredUnit").hidden = delivered === null;
+      showReading("travel", hasRun ? readNumber(fields, "TRAVEL MM", "mm") : null, " mm");
+
+      const maxFlow = readNumber(fields, "MAX FLOW", "mL/min") ??
+        readNumber(fields, "MAX FLOW FOR SYRINGE", "mL/min");
+      $("maxRate").textContent = maxFlow !== null && reportedSyringe !== null
+        ? `Firmware limit for configured ${reportedSyringe} mL syringe: ${maxFlow} mL/min.`
+        : "The Arduino checks its motor-speed limit.";
+
+      const forceStatus = fields.get("FORCE SENSOR");
+      const forceLabels = {
+        OK: "Receiving samples · calibration pending.",
+        WAITING: "Waiting for a fresh sample.",
+        STALE: "Sample timed out.",
+        "NO DATA": "No sample received. Check the HX711 connection.",
+        SATURATED: "ADC saturated. Check the load and sensor wiring.",
+        SUSPENDED: "Sampling resumes when the motor driver is disabled."
+      };
+      $("forceHealth").textContent = Object.hasOwn(forceLabels, forceStatus)
+        ? forceLabels[forceStatus]
+        : connected && lastStatusAt !== null
+          ? "The board did not report HX711 diagnostics."
+          : connected ? "Waiting for Arduino status."
+          : "Connect the Arduino to view sensor status.";
+      const raw = fields.get("FORCE RAW");
+      const count = /^-?\d+$/.test(raw ?? "") ? Number(raw) : null;
+      const age = readNumber(fields, "FORCE SAMPLE AGE MS");
+      const validForce = ["OK", "SATURATED"].includes(forceStatus) &&
+        Number.isInteger(count) && count >= -8388608 && count <= 8388607 &&
+        age !== null && Number(age) < 1000;
+      showReading("forceRaw", validForce ? count : null);
+      showReading("forceAge", validForce ? age : null, " ms");
+    }
+
+    function clearStatus() {
+      statusFields = null;
+      lastStatusAt = null;
+      renderStatus(new Map());
+      updateControls();
+    }
+
+    function expireStatus() {
+      if (lastStatusAt !== null && Date.now() - lastStatusAt >= STATUS_EXPIRY_MS) {
+        clearStatus();
+        notice("No recent status from the Arduino.", true);
+      }
+    }
+
     function handleLine(line) {
-      if (!line || line.startsWith("---")) {
+      if (line === "------- PUMP STATUS -------") {
+        statusFields = new Map();
         return;
       }
 
-      if (line.startsWith("DIRECTION:")) {
-        const actualDirection = line.slice("DIRECTION:".length).trim();
-        if (["FORWARD", "BACKWARD"].includes(actualDirection)) {
-          $("actualDirection").textContent = actualDirection;
+      if (/^-{3,}$/.test(line)) {
+        if (statusFields) {
+          const fields = statusFields;
+          statusFields = null;
+          const reportedState = fields.get("STATE");
+          if (["IDLE", "RUNNING", "PAUSING", "PAUSED", "COMPLETE", "ALARM", "FAULT"]
+            .includes(reportedState)) {
+            const awaitingStatus = lastStatusAt === null;
+            pumpState = reportedState;
+            lastStatusAt = Date.now();
+            renderStatus(fields);
+            updateControls();
+            if (awaitingStatus && ["IDLE", "COMPLETE"].includes(pumpState)) {
+              notice("Arduino status received.");
+            }
+          }
         }
+        return;
       }
 
-      if (line.startsWith("STATE:")) {
-        pumpState = line.slice(6).trim();
-        updateControls();
-      }
-
-      else if (
-        line.startsWith("ESTIMATED DELIVERED:")
-      ) {
-        const value = parseFloat(
-          line.split(":")[1]
-        );
-
-        if (Number.isFinite(value)) {
-          $("delivered").textContent =
-            value.toFixed(4);
-        }
-      }
-
-      else if (line.startsWith("FLOW RATE:")) {
-        const value = line.split(":")[1].trim();
-        $("actualRate").textContent =
-          value.includes("mL/min") ? value : `${value} mL/min`;
-      }
-
-      else if (line.startsWith("TARGET VOLUME:")) {
-        const value = line.split(":")[1].trim();
-        $("actualVolume").textContent =
-          value.includes("mL") ? value : `${value} mL`;
-      }
-
-      else if (line.startsWith("CURRENT RPM:")) {
-        $("rpm").textContent =
-          `${line.split(":")[1].trim()} RPM`;
-      }
-
-      else if (line.startsWith("STEPS:")) {
-        const value =
-          line.split(":")[1].trim();
-
-        $("steps").textContent = value;
-
-        const [done, total] =
-          value.split("/").map(Number);
-
-        if (
-          Number.isFinite(done) &&
-          Number.isFinite(total)
-        ) {
-          const pct =
-            total > 0
-              ? Math.min(
-                  100,
-                  Math.max(0, done / total * 100)
-                )
-              : 0;
-
-          $("percent").textContent =
-            `${pct.toFixed(1)}%`;
-
-          $("progress").style.width =
-            `${pct}%`;
-        }
-      }
-
-      else if ((line.startsWith("MAX FLOW:") ||
-        line.startsWith("MAX FLOW FOR SYRINGE:"))) {
-        $("maxRate").textContent =
-          "Current firmware limit: " +
-          line.split(":")[1].trim() +
-          " mL/min.";
+      const field = /^([A-Z][A-Z ]+):\s*(.*)$/.exec(line);
+      if (statusFields && field && !["ALARM", "ERROR"].includes(field[1])) {
+        statusFields.set(field[1], field[2].trim());
+        return;
       }
 
       // --------------------------------------
@@ -1325,6 +1397,10 @@
         line
       )) {
         pumpState = states[line];
+
+        if (line === "PUMP STARTED") {
+          clearStatus();
+        }
 
         log(`✓ ${line}`);
         updateControls();
@@ -1424,7 +1500,7 @@
           );
 
           pumpState = "DISCONNECTED";
-          updateControls();
+          clearStatus();
 
           notice(
             "USB connection lost. The Arduino " +
@@ -1488,7 +1564,7 @@
 
         readingTask = readLoop();
 
-        updateControls();
+        clearStatus();
 
         notice(
           "Waiting for Arduino to reset..."
@@ -1506,24 +1582,16 @@
           return;
         }
 
+        notice("USB open. Waiting for Arduino status...");
         await sendLine("STATUS");
 
-        // STATUS also refreshes the watchdog
-        // in the latest Arduino IDE sketch.
+        // STATUS also refreshes the Arduino watchdog.
         timer = setInterval(() => {
+          expireStatus();
           if (connected && !busy) {
-            sendLine("STATUS").catch(
-              (error) => {
-                notice(error.message, true);
-              }
-            );
+            requestStatus();
           }
-        }, 4000);
-
-        notice(
-          "Connected. Choose settings, " +
-          "then press Start."
-        );
+        }, STATUS_POLL_MS);
       }
 
       catch (error) {
@@ -1587,7 +1655,7 @@
 
       pumpState = "DISCONNECTED";
 
-      updateControls();
+      clearStatus();
 
       if (!force) {
         notice("Disconnected.");
@@ -1602,12 +1670,17 @@
     // RUN COMMAND SEQUENCE
     // ==========================================
 
+    function requestStatus() {
+      sendLine("STATUS").catch(error => notice(error.message, true));
+    }
+
     async function runCommands(
       steps,
       label,
       isStart = false
     ) {
-      if (!connected || busy) {
+      expireStatus();
+      if (!connected || busy || lastStatusAt === null) {
         return;
       }
 
@@ -1659,6 +1732,9 @@
         if (id === operationId) {
           busy = false;
           updateControls();
+          if (connected) {
+            requestStatus();
+          }
         }
       }
     }
@@ -1716,7 +1792,7 @@
           ]
         ],
 
-        "Infusion started.",
+        direction === "BACKWARD" ? "Retraction started." : "Infusion started.",
         true
       );
     }
@@ -1810,6 +1886,7 @@
 
       try {
         await sendLine("STOP");
+        requestStatus();
       }
 
       catch (error) {
