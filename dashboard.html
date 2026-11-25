@@ -1018,7 +1018,9 @@
     function setForceAlarm(reason) {
       const alarms = {
         "FORCE OVERLOAD": "Force cutoff reached. Motor disabled.",
-        "FORCE SENSOR FAULT": "Force reading unavailable or invalid. Motor disabled."
+        "FORCE SENSOR FAULT": "Force reading unavailable or invalid. Motor disabled.",
+        "MAX SWITCH BEFORE TARGET VOLUME":
+          "MAX switch reached before the target volume was delivered. Motor disabled."
       };
       const next = Object.hasOwn(alarms, reason) ? reason : null;
       if (next === forceAlarm) return;
