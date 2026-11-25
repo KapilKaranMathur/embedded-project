@@ -7,7 +7,7 @@
 #include "ForceSensor.h"
 
 // =====================================================
-// SYRINGE PUMP V3.8
+// SYRINGE PUMP V3.9
 // Arduino Mega 2560 + RAMPS 1.4 + A4988
 // FORWARD / BACKWARD MOTOR CONTROL
 // Non-medical benchtop prototype
@@ -32,6 +32,10 @@ const float MAX_STEP_HZ = 1000.0f;
 const float MIN_STEP_HZ = 0.01f;
 const float ACCEL = 800.0f;
 const float JOG_STEP_HZ = 400.0f;
+const float REVERSE_CRUISE_HZ = 1.5f * STEPS_PER_MM;
+const float REVERSE_UNREFERENCED_HZ = 1.0f * STEPS_PER_MM;
+const float HOME_APPROACH_HZ = 0.75f * STEPS_PER_MM;
+const unsigned long HOME_APPROACH_STEPS = 2.0f * STEPS_PER_MM;
 
 const unsigned long MIN_STEP_US = 1000UL;
 const unsigned long LINK_TIMEOUT_MS = 15000UL;
@@ -45,6 +49,7 @@ float stepsPerML = 0.0f;
 // Independent user settings
 float flowRate = 1.0f;       // mL/min
 float targetVolume = 1.0f;   // mL-equivalent travel
+float retractSpeedHz = REVERSE_CRUISE_HZ;
 
 enum PumpState {
   IDLE,
@@ -178,6 +183,21 @@ void trackTravelStep(Direction moved) {
 
 unsigned long remainingForwardSteps() {
   return positionSteps < forwardLimitSteps ? forwardLimitSteps - positionSteps : 0;
+}
+
+float limitReverseSpeed(float requestedHz) {
+  if (!positionKnown) {
+    return min(requestedHz, REVERSE_UNREFERENCED_HZ);
+  }
+  if (positionSteps <= HOME_APPROACH_STEPS || requestedHz <= HOME_APPROACH_HZ) {
+    return min(requestedHz, HOME_APPROACH_HZ);
+  }
+
+  const unsigned long brakingSteps = positionSteps - HOME_APPROACH_STEPS;
+  const float approachLimitSquared = HOME_APPROACH_HZ * HOME_APPROACH_HZ +
+    2.0f * ACCEL * brakingSteps;
+  return approachLimitSquared < requestedHz * requestedHz
+    ? sqrtf(approachLimitSquared) : requestedHz;
 }
 
 bool checkForwardTravel(Direction requested, unsigned long steps) {
@@ -373,7 +393,7 @@ void startPump() {
     return;
   }
 
-  if (!validRate(flowRate)) {
+  if (!returning && !validRate(flowRate)) {
     Serial.println(F("ERROR: INVALID FLOW RATE"));
     return;
   }
@@ -495,7 +515,7 @@ void resumePump() {
     return;
   }
 
-  if (!validRate(flowRate)) {
+  if (!returnRun && !validRate(flowRate)) {
     Serial.println(F("ERROR: INVALID FLOW RATE"));
     return;
   }
@@ -547,7 +567,12 @@ void updateMotion() {
     return;
   }
 
-  float desiredHz = jogging ? JOG_STEP_HZ : state == RUNNING ? rateHz(flowRate) : 0.0f;
+  float desiredHz = 0.0f;
+  if (jogging) {
+    desiredHz = jogDirection == BACKWARD ? limitReverseSpeed(REVERSE_CRUISE_HZ) : JOG_STEP_HZ;
+  } else if (state == RUNNING) {
+    desiredHz = returnRun ? limitReverseSpeed(retractSpeedHz) : rateHz(flowRate);
+  }
   if (volumeLimited) {
     const unsigned long remaining = targetSteps - deliveredSteps;
     const float stoppingHz = sqrtf(2.0f * ACCEL * remaining);
@@ -727,6 +752,10 @@ void printStatus() {
 
   Serial.print(F("JOG SPEED MM S: "));
   Serial.println(JOG_STEP_HZ / STEPS_PER_MM, 2);
+  Serial.print(F("RETRACT SPEED MM S: "));
+  Serial.println(retractSpeedHz / STEPS_PER_MM, 6);
+  Serial.print(F("RETRACT MAX MM S: "));
+  Serial.println(REVERSE_CRUISE_HZ / STEPS_PER_MM, 2);
   if (state == JOGGING) {
     Serial.print(F("JOG DIRECTION: "));
     Serial.println(jogDirection == FORWARD ? F("FORWARD") : F("BACKWARD"));
@@ -936,6 +965,27 @@ void processCommand(char* command) {
     Serial.println(F("FLOW RATE UPDATED"));
   }
 
+  else if (strcmp(command, "RETRACT") == 0) {
+    if (state != IDLE && state != COMPLETE) {
+      Serial.println(F("ERROR: STOP FIRST"));
+      return;
+    }
+
+    float speedMmPerSecond;
+    if (!positiveNumber(argument, speedMmPerSecond)) {
+      Serial.println(F("ERROR: INVALID RETRACT SPEED"));
+      return;
+    }
+    const float speedHz = speedMmPerSecond * STEPS_PER_MM;
+    if (speedHz < MIN_STEP_HZ || speedHz > REVERSE_CRUISE_HZ) {
+      Serial.println(F("ERROR: INVALID RETRACT SPEED"));
+      return;
+    }
+
+    retractSpeedHz = speedHz;
+    Serial.println(F("RETRACT SPEED UPDATED"));
+  }
+
   // ---------------- TARGET VOLUME ----------------
 
   else if (strcmp(command, "VOLUME") == 0) {
@@ -1037,7 +1087,7 @@ void setup() {
   lastContactMs = millis();
   lastUpdateUs = micros();
 
-  Serial.println(F("SYRINGE PUMP V3.8 READY"));
+  Serial.println(F("SYRINGE PUMP V3.9 READY"));
   Serial.println(
     F("DIRECTION: FORWARD / BACKWARD")
   );
