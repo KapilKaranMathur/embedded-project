@@ -1291,6 +1291,9 @@
         $("jogHelp").textContent = "Connect the Arduino and wait for status to use keyboard jog.";
       } else if (jogSpeed === null) {
         $("jogHelp").textContent = "Keyboard jog requires V3.6 or newer firmware.";
+      } else if (alarm && forceAlarm === "MAX SWITCH BEFORE TARGET VOLUME") {
+        $("jogHelp").textContent =
+          "Hold ← to acknowledge the limit alarm and move backward away from MAX. Calibration and cutoff are preserved.";
       } else if (!idle) {
         $("jogHelp").textContent = "Keyboard jog is available when the pump is idle.";
       } else {
@@ -2168,9 +2171,12 @@
       }
 
       expireStatus();
+      const recoveringFromMax = requested === "BACKWARD" &&
+        ["FAULT", "ALARM"].includes(pumpState) &&
+        forceAlarm === "MAX SWITCH BEFORE TARGET VOLUME";
       if (event.repeat || document.hidden || !document.hasFocus() ||
           !connected || busy || lastStatusAt === null || jogSpeed === null ||
-          !["IDLE", "COMPLETE"].includes(pumpState)) return;
+          (!recoveringFromMax && !["IDLE", "COMPLETE"].includes(pumpState))) return;
 
       event.preventDefault();
       if (requested === "FORWARD") {
@@ -2182,7 +2188,11 @@
         }
       }
 
-      await beginJog({ key: event.key }, `JOG ${requested}`);
+      await beginJog(
+        { key: event.key },
+        `JOG ${requested}`,
+        recoveringFromMax ? "ACK LIMIT" : null
+      );
     }
 
     function startCommissionJog(event) {
@@ -2196,11 +2206,24 @@
       void beginJog(hold, "JOG COMMISSION");
     }
 
-    async function beginJog(hold, command) {
+    async function beginJog(hold, command, recoveryCommand = null) {
       keyboardJog = hold;
       updateControls();
       void enableAlarmSound();
       try {
+        if (recoveryCommand) {
+          await expectReply(
+            recoveryCommand,
+            "LIMIT ALARM ACKNOWLEDGED",
+            500,
+            () => keyboardJog === hold
+          );
+          if (keyboardJog !== hold) return;
+          pumpState = "IDLE";
+          setForceAlarm(null);
+          notice("Limit alarm acknowledged. Moving backward away from MAX.");
+          updateControls();
+        }
         await expectReply(command, "JOG READY", 500, () => keyboardJog === hold);
         if (keyboardJog !== hold) return;
         hold.confirmed = true;
