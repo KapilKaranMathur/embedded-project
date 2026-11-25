@@ -1020,7 +1020,9 @@
         "FORCE OVERLOAD": "Force cutoff reached. Motor disabled.",
         "FORCE SENSOR FAULT": "Force reading unavailable or invalid. Motor disabled.",
         "MAX SWITCH BEFORE TARGET VOLUME":
-          "MAX switch reached before the target volume was delivered. Motor disabled."
+          "MAX switch reached before the target volume was delivered. Motor disabled.",
+        "HOME SWITCH DID NOT RELEASE":
+          "HOME remained active after the departure allowance. Motor disabled."
       };
       const next = Object.hasOwn(alarms, reason) ? reason : null;
       if (next === forceAlarm) return;
@@ -1294,6 +1296,9 @@
       } else if (alarm && forceAlarm === "MAX SWITCH BEFORE TARGET VOLUME") {
         $("jogHelp").textContent =
           "Hold ← to acknowledge the limit alarm and move backward away from MAX. Calibration and cutoff are preserved.";
+      } else if (alarm && forceAlarm === "HOME SWITCH DID NOT RELEASE") {
+        $("jogHelp").textContent =
+          "Hold → to acknowledge the limit alarm and retry moving forward away from HOME. The retry is limited to 2 mm.";
       } else if (!idle) {
         $("jogHelp").textContent = "Keyboard jog is available when the pump is idle.";
       } else {
@@ -2174,9 +2179,13 @@
       const recoveringFromMax = requested === "BACKWARD" &&
         ["FAULT", "ALARM"].includes(pumpState) &&
         forceAlarm === "MAX SWITCH BEFORE TARGET VOLUME";
+      const recoveringFromHome = requested === "FORWARD" &&
+        ["FAULT", "ALARM"].includes(pumpState) &&
+        forceAlarm === "HOME SWITCH DID NOT RELEASE";
+      const recoveringFromLimit = recoveringFromMax || recoveringFromHome;
       if (event.repeat || document.hidden || !document.hasFocus() ||
           !connected || busy || lastStatusAt === null || jogSpeed === null ||
-          (!recoveringFromMax && !["IDLE", "COMPLETE"].includes(pumpState))) return;
+          (!recoveringFromLimit && !["IDLE", "COMPLETE"].includes(pumpState))) return;
 
       event.preventDefault();
       if (requested === "FORWARD") {
@@ -2191,7 +2200,7 @@
       await beginJog(
         { key: event.key },
         `JOG ${requested}`,
-        recoveringFromMax ? "ACK LIMIT" : null
+        recoveringFromLimit ? "ACK LIMIT" : null
       );
     }
 
@@ -2221,7 +2230,11 @@
           if (keyboardJog !== hold) return;
           pumpState = "IDLE";
           setForceAlarm(null);
-          notice("Limit alarm acknowledged. Moving backward away from MAX.");
+          notice(
+            command === "JOG BACKWARD"
+              ? "Limit alarm acknowledged. Moving backward away from MAX."
+              : "Limit alarm acknowledged. Retrying forward movement away from HOME."
+          );
           updateControls();
         }
         await expectReply(command, "JOG READY", 500, () => keyboardJog === hold);
