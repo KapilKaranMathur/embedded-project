@@ -660,7 +660,7 @@
 
         <details class="force-setup" id="volumeCalibrationPanel" hidden>
           <summary>Calibrate delivered volume</summary>
-          <p class="helper">Run three water tests with the selected syringe, then enter the commanded volume and average collected volume. Calibration is saved separately for 20 mL and 50 mL.</p>
+          <p class="helper">Run three water tests with the selected syringe, then enter the commanded volume and average collected volume. Calibration is saved separately for 20 mL and 50 mL. Use results produced by the currently active calibration; clear it first when restarting from provisional dimensions.</p>
           <div class="force-fields">
             <label>Commanded test volume (mL)
               <input id="calibrationCommanded" type="number" min="0.01" step="0.001">
@@ -2502,6 +2502,10 @@
       await runCommands(
         [
           [
+            `SYRINGE ${syringe}`,
+            "SYRINGE UPDATED"
+          ],
+          [
             `VOLUME ${value.toFixed(3)}`,
             "TARGET VOLUME UPDATED"
           ]
@@ -2528,14 +2532,20 @@
       }
 
       await runCommands(
-        [[`VOLUME CAL ${commanded.toFixed(3)} ${measured.toFixed(3)}`, "VOLUME CALIBRATED"]],
+        [
+          [`SYRINGE ${syringe}`, "SYRINGE UPDATED"],
+          [`VOLUME CAL ${commanded.toFixed(3)} ${measured.toFixed(3)}`, "VOLUME CALIBRATED"]
+        ],
         `Saved ${syringe} mL volume calibration.`
       );
     }
 
     async function clearVolumeCalibration() {
       await runCommands(
-        [["VOLUME CLEAR", "VOLUME CALIBRATION CLEARED"]],
+        [
+          [`SYRINGE ${syringe}`, "SYRINGE UPDATED"],
+          ["VOLUME CLEAR", "VOLUME CALIBRATION CLEARED"]
+        ],
         `Cleared ${syringe} mL volume calibration.`
       );
     }
