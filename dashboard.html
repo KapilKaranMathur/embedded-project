@@ -638,8 +638,8 @@
         </div>
 
         <p class="helper">
-          Start automatically applies all three
-          displayed settings, in order.
+          Start applies the syringe size, direction,
+          flow rate and target volume in that order.
         </p>
       </section>
 
@@ -1195,8 +1195,10 @@
       }
 
       if (line.startsWith("DIRECTION:")) {
-        $("actualDirection").textContent =
-          line.split(":")[1].trim();
+        const actualDirection = line.slice("DIRECTION:".length).trim();
+        if (["FORWARD", "BACKWARD"].includes(actualDirection)) {
+          $("actualDirection").textContent = actualDirection;
+        }
       }
 
       if (line.startsWith("STATE:")) {
@@ -1308,8 +1310,8 @@
         "PUMP STARTED": "RUNNING",
 
         "PUMP STOPPED":
-          pumpState === "FAULT"
-            ? "FAULT"
+          ["FAULT", "ALARM"].includes(pumpState)
+            ? pumpState
             : "IDLE",
 
         "PUMP PAUSED": "PAUSED",
@@ -1330,9 +1332,9 @@
 
       const confirmations = [
         "SYRINGE UPDATED",
+        "DIRECTION UPDATED",
         "FLOW RATE UPDATED",
-        "TARGET VOLUME UPDATED",
-        "PUMP ARMED"
+        "TARGET VOLUME UPDATED"
       ];
 
       if (confirmations.includes(line)) {
@@ -1684,9 +1686,7 @@
         return;
       }
 
-      // Each command waits for confirmation.
-      // This sketch requires ARM before START.
-      // If ARM is unsupported, START is not sent.
+      // Each command waits for its firmware acknowledgement.
 
       await runCommands(
         [
