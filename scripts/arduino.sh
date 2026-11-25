@@ -47,8 +47,22 @@ export ARDUINO_BUILD_CACHE_PATH="${ARDUINO_BUILD_CACHE_PATH:-"$root/.build/cache
 build_dir="$(mktemp -d "$root/.build/mega2560.XXXXXXXX")"
 trap 'rm -rf -- "$build_dir"' EXIT
 
-"$cli" compile --fqbn "$fqbn" --warnings all --build-path "$build_dir" "$sketch"
+hx711_name="HX711_Arduino_Library-0.7.5"
+hx711_url="https://downloads.arduino.cc/libraries/github.com/bogde/$hx711_name.zip"
+hx711_hash="11a72d1d462a0306e8e0c5cf33d215cefded2e9c9b7ce05e1f1d2d42b47291f6"
+hx711_archive="$root/.build/$hx711_name.zip"
+if [[ ! -f "$hx711_archive" ]]; then
+  curl --fail --silent --show-error --location --max-time 30 \
+    --output "$build_dir/$hx711_name.zip" "$hx711_url"
+  printf '%s  %s\n' "$hx711_hash" "$build_dir/$hx711_name.zip" | shasum -a 256 --check
+  mv -f -- "$build_dir/$hx711_name.zip" "$hx711_archive"
+fi
+printf '%s  %s\n' "$hx711_hash" "$hx711_archive" | shasum -a 256 --check
+unzip -q "$hx711_archive" -d "$build_dir/libraries"
+
+"$cli" compile --fqbn "$fqbn" --warnings all --build-path "$build_dir/build" \
+  --library "$build_dir/libraries/$hx711_name" "$sketch"
 
 if [[ "$action" == upload ]]; then
-  "$cli" upload --fqbn "$fqbn" --port "$port" --input-dir "$build_dir" --verify "$sketch"
+  "$cli" upload --fqbn "$fqbn" --port "$port" --input-dir "$build_dir/build" --verify "$sketch"
 fi
